@@ -1,0 +1,15 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+.streamlit/secrets.toml
+data/applications/
+# Personal resumes — exclude everything except the template
+data/resumes/*
+!data/resumes/example.md
+# Reference files that aren't part of the app
+seek_template.docx
+New Text Document.txt
+# Old legacy placeholder (replaced by data/resumes/example.md)
+data/master_resume.md
