@@ -211,6 +211,163 @@ st.markdown(
 
 # --- Session state -------------------------------------------------------
 ss = st.session_state
+ss.setdefault("auth_ok", False)
+
+
+# --- Access gate (email OTP > password > open) --------------------------
+# Email OTP activates when SMTP_USER + SMTP_PASS + ALLOWED_EMAILS are all set.
+# Password gate activates when only APP_PASSWORD is set.
+# Otherwise the app is open (for local dev).
+
+def _secret(name: str) -> str:
+    """Read a value from Streamlit secrets, fall back to env var."""
+    try:
+        if hasattr(st, "secrets"):
+            v = st.secrets.get(name)
+            if v:
+                return str(v).strip()
+    except Exception:  # noqa: BLE001 — st.secrets raises when secrets file missing
+        pass
+    return os.environ.get(name, "").strip()
+
+
+def _resolve_otp_config() -> dict | None:
+    smtp_user = _secret("SMTP_USER")
+    smtp_pass = _secret("SMTP_PASS")
+    allowed = _secret("ALLOWED_EMAILS")
+    if not (smtp_user and smtp_pass and allowed):
+        return None
+    return {"smtp_user": smtp_user, "smtp_pass": smtp_pass, "allowed": allowed}
+
+
+def _email_otp_gate(cfg: dict) -> bool:
+    """Two-step email OTP login with rolling 5-min session."""
+    import time as _t
+    from core import auth as _auth
+
+    now = _t.time()
+    # Valid session? Roll the expiry forward 5 min on this rerun (active use extends it).
+    if ss.get("auth_ok") and ss.get("auth_expires_at", 0) > now:
+        ss["auth_expires_at"] = now + _auth.SESSION_TTL_SECONDS
+        return True
+    # Was authenticated but session lapsed — drop it back to login screen.
+    if ss.get("auth_ok"):
+        ss["auth_ok"] = False
+        ss.pop("auth_expires_at", None)
+        ss["just_expired"] = True
+
+    st.markdown(
+        """
+        <div style="max-width: 460px; margin: 4.5rem auto 0; text-align: center;">
+          <h1 style="margin-bottom: 0.4rem;">Job Application Assistant</h1>
+          <p style="color: #666; margin-bottom: 1.5rem;">Private deployment. Sign in with your email.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if ss.pop("just_expired", False):
+        with st.container():
+            _l, _m, _r = st.columns([1, 2, 1])
+            with _m:
+                st.info("Your session timed out after 5 minutes. Sign in again.")
+
+    _l, _m, _r = st.columns([1, 2, 1])
+    with _m:
+        if "otp_pending_email" not in ss:
+            # Step 1 — request a code
+            with st.form("otp_request_form"):
+                email = st.text_input("Your email", placeholder="you@example.com")
+                requested = st.form_submit_button("Send access code", type="primary", use_container_width=True)
+            if requested:
+                if not email.strip():
+                    st.error("Enter your email address.")
+                elif not _auth.is_email_allowed(email, cfg["allowed"]):
+                    st.error("This email isn't on the allowlist. Ask the admin to add it.")
+                else:
+                    code = _auth.generate_otp()
+                    ss["otp_pending_email"] = email.strip()
+                    ss["otp_code"] = code
+                    ss["otp_expires_at"] = now + _auth.OTP_TTL_SECONDS
+                    try:
+                        _auth.send_otp_email(email, code, cfg["smtp_user"], cfg["smtp_pass"])
+                        st.success(f"Code sent to {email}. Check your inbox (and spam).")
+                        st.rerun()
+                    except Exception as e:  # noqa: BLE001
+                        st.error(f"Could not send email: {e}")
+                        ss.pop("otp_pending_email", None)
+                        ss.pop("otp_code", None)
+        else:
+            # Step 2 — enter the code
+            st.markdown(f"Code sent to **{ss['otp_pending_email']}**. Valid for 5 minutes.")
+            with st.form("otp_verify_form"):
+                code_input = st.text_input("6-digit code", max_chars=6, placeholder="123456")
+                verified = st.form_submit_button("Log in", type="primary", use_container_width=True)
+            if verified:
+                if now > ss.get("otp_expires_at", 0):
+                    st.error("Code expired. Request a new one.")
+                    ss.pop("otp_code", None)
+                    ss.pop("otp_pending_email", None)
+                elif code_input.strip() == ss.get("otp_code", ""):
+                    ss["auth_ok"] = True
+                    ss["auth_email"] = ss["otp_pending_email"]
+                    ss["auth_expires_at"] = now + _auth.SESSION_TTL_SECONDS
+                    for k in ("otp_code", "otp_pending_email", "otp_expires_at"):
+                        ss.pop(k, None)
+                    st.rerun()
+                else:
+                    st.error("Incorrect code. Try again.")
+            if st.button("Use a different email", use_container_width=True):
+                for k in ("otp_code", "otp_pending_email", "otp_expires_at"):
+                    ss.pop(k, None)
+                st.rerun()
+    return False
+
+
+def _password_gate() -> bool:
+    """Fallback shared-password gate. Active only if APP_PASSWORD is set."""
+    expected = _secret("APP_PASSWORD")
+    if not expected:
+        return True
+    if ss.get("auth_ok"):
+        return True
+    st.markdown(
+        """
+        <div style="max-width: 480px; margin: 6rem auto 0; text-align: center;">
+          <h1 style="margin-bottom: 0.4rem;">Job Application Assistant</h1>
+          <p style="color: #666; margin-bottom: 2rem;">
+            Private deployment. Enter the access password to continue.
+          </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    _l, _m, _r = st.columns([1, 2, 1])
+    with _m:
+        with st.form("auth_form", clear_on_submit=False):
+            pw = st.text_input("Password", type="password", label_visibility="collapsed",
+                               placeholder="Access password")
+            submitted = st.form_submit_button("Enter", use_container_width=True, type="primary")
+        if submitted:
+            if pw == expected:
+                ss["auth_ok"] = True
+                st.rerun()
+            else:
+                st.error("Incorrect password.")
+    return False
+
+
+def _check_access_gate() -> bool:
+    """Pick the strongest configured gate. Open if nothing's configured."""
+    otp_cfg = _resolve_otp_config()
+    if otp_cfg:
+        return _email_otp_gate(otp_cfg)
+    return _password_gate()
+
+
+if not _check_access_gate():
+    st.stop()
+
+
 ss.setdefault("job", None)
 ss.setdefault("draft", None)
 ss.setdefault("saved", None)            # local mode: SavedApplication dict
@@ -354,7 +511,19 @@ with st.sidebar:
         help="Bypass the Anthropic API and return a hardcoded draft. Useful for UI testing.",
     )
 
-    # 4) About
+    # 4) Sign out (only shown when the OTP gate is active)
+    if ss.get("auth_ok") and ss.get("auth_email"):
+        import time as _t
+        st.divider()
+        remaining = max(0, int(ss.get("auth_expires_at", 0) - _t.time()))
+        mins, secs = divmod(remaining, 60)
+        st.caption(f"Signed in as **{ss['auth_email']}** · session expires in {mins}:{secs:02d}")
+        if st.button("Sign out", use_container_width=True):
+            for k in ("auth_ok", "auth_email", "auth_expires_at"):
+                ss.pop(k, None)
+            st.rerun()
+
+    # 5) About
     with st.expander("About / privacy"):
         st.markdown(
             f"**Mode:** {mode_label}\n\n"

@@ -122,8 +122,8 @@ def _tailor_with_claude(
     resolved_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
     if not resolved_key.strip():
         raise TailorError(
-            "ANTHROPIC_API_KEY is not set. Add it to your environment or to "
-            ".streamlit/secrets.toml. See README for setup."
+            "No Anthropic API key. Paste your key in the sidebar under "
+            "'2. Anthropic API key'. Get one at console.anthropic.com/settings/keys."
         )
     if not master_resume_md.strip():
         raise TailorError(

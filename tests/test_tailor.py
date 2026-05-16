@@ -137,7 +137,7 @@ def test_tailor_real_path_raises_without_api_key(monkeypatch):
     try:
         tailor.tailor(job, "# Master\n\nSome content", use_mock=False, api_key=None)
     except tailor.TailorError as e:
-        assert "ANTHROPIC_API_KEY" in str(e)
+        assert "Anthropic API key" in str(e) or "ANTHROPIC_API_KEY" in str(e)
         return
     raise AssertionError("Expected TailorError when API key absent")
 
