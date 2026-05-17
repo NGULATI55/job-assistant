@@ -27,11 +27,10 @@ class SavedApplication(TypedDict, total=False):
     folder: Path
     job_json: Path
     application_meta_json: Path
-    tailored_resume_md: Path
-    cover_note_md: Path
-    match_summary_md: Path
-    missing_requirements_md: Path
     tailored_resume_docx: Path
+    cover_note_docx: Path
+    match_summary_docx: Path
+    missing_requirements_docx: Path
     tailored_resume_pdf: Path
     cover_note_pdf: Path
     docx_warning: str
@@ -70,8 +69,6 @@ def build_application_bundle(
     now = now or datetime.now()
 
     job_bytes = json.dumps(job, indent=2, ensure_ascii=False).encode("utf-8")
-    resume_bytes = draft["tailored_resume_md"].encode("utf-8")
-    cover_bytes = draft["cover_note_md"].encode("utf-8")
 
     meta = {
         "saved_at": now.isoformat(timespec="seconds"),
@@ -88,23 +85,31 @@ def build_application_bundle(
     bundle: dict[str, bytes] = {
         "job.json": job_bytes,
         "application_meta.json": meta_bytes,
-        "tailored_resume.md": resume_bytes,
-        "cover_note.md": cover_bytes,
     }
-
-    summary = draft.get("match_summary", "").strip()
-    if summary:
-        bundle["match_summary.md"] = (
-            f"# Match summary\n\n{summary}\n".encode("utf-8")
-        )
-
-    missing = draft.get("missing_requirements") or []
-    if missing:
-        body = "# Missing requirements\n\n" + "\n".join(f"- {m}" for m in missing) + "\n"
-        bundle["missing_requirements.md"] = body.encode("utf-8")
 
     warnings: dict[str, str] = {}
 
+    # DOCX (editable in Word) — replaces the old .md text files
+    try:
+        bundle["tailored_resume.docx"] = exporter.markdown_to_docx_bytes(
+            draft["tailored_resume_md"]
+        )
+        bundle["cover_note.docx"] = exporter.markdown_to_docx_bytes(
+            draft["cover_note_md"]
+        )
+        summary = draft.get("match_summary", "").strip()
+        if summary:
+            bundle["match_summary.docx"] = exporter.markdown_to_docx_bytes(
+                f"# Match summary\n\n{summary}"
+            )
+        missing = draft.get("missing_requirements") or []
+        if missing:
+            body = "# Missing requirements\n\n" + "\n".join(f"- {m}" for m in missing)
+            bundle["missing_requirements.docx"] = exporter.markdown_to_docx_bytes(body)
+    except Exception as e:  # noqa: BLE001
+        warnings["docx"] = f"docx export failed: {e}"
+
+    # PDF (designed, beautiful) — primary deliverable for sending to employers
     pdf_title_resume = f"Tailored Resume — {job.get('title', '')} at {job.get('company', '')}".strip(" —")
     pdf_title_cover = f"Cover Note — {job.get('title', '')} at {job.get('company', '')}".strip(" —")
     try:
@@ -145,19 +150,17 @@ def save_application(
         "folder": folder,
         "job_json": folder / "job.json",
         "application_meta_json": folder / "application_meta.json",
-        "tailored_resume_md": folder / "tailored_resume.md",
-        "cover_note_md": folder / "cover_note.md",
     }
-    if "match_summary.md" in bundle:
-        result["match_summary_md"] = folder / "match_summary.md"
-    if "missing_requirements.md" in bundle:
-        result["missing_requirements_md"] = folder / "missing_requirements.md"
-    if "tailored_resume.docx" in bundle:
-        result["tailored_resume_docx"] = folder / "tailored_resume.docx"
-    if "tailored_resume.pdf" in bundle:
-        result["tailored_resume_pdf"] = folder / "tailored_resume.pdf"
-    if "cover_note.pdf" in bundle:
-        result["cover_note_pdf"] = folder / "cover_note.pdf"
+    for fname, key in (
+        ("tailored_resume.docx", "tailored_resume_docx"),
+        ("cover_note.docx", "cover_note_docx"),
+        ("match_summary.docx", "match_summary_docx"),
+        ("missing_requirements.docx", "missing_requirements_docx"),
+        ("tailored_resume.pdf", "tailored_resume_pdf"),
+        ("cover_note.pdf", "cover_note_pdf"),
+    ):
+        if fname in bundle:
+            result[key] = folder / fname  # type: ignore[literal-required]
     if warnings.get("docx"):
         result["docx_warning"] = warnings["docx"]
     if warnings.get("pdf"):

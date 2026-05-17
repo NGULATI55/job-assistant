@@ -21,7 +21,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from core import seek_fetch, resume_loader, tailor, saver, exporter
+from core import seek_fetch, resume_loader, tailor, saver, exporter, job_search
 
 
 # --- Playwright bootstrap (for hosted deployments like Streamlit Cloud) ---
@@ -369,6 +369,8 @@ if not _check_access_gate():
 
 
 ss.setdefault("job", None)
+ss.setdefault("search_results", None)  # list of JobSearchResult dicts
+ss.setdefault("search_query", "")
 ss.setdefault("draft", None)
 ss.setdefault("saved", None)            # local mode: SavedApplication dict
 ss.setdefault("download_bundle", None)  # multi-user mode: (filename, bytes, warning)
@@ -596,7 +598,7 @@ _step_header(1, "Provide the job")
 with st.container(border=True):
     mode = st.radio(
         "Input mode",
-        options=["Mock", "Live SEEK URL", "Manual paste"],
+        options=["Mock", "Search jobs", "Job URL", "Manual paste"],
         horizontal=True,
         key="mode",
     )
@@ -609,8 +611,101 @@ with st.container(border=True):
             job = seek_fetch.load_mock()
             ss["fetch_status"] = None
 
-    elif mode == "Live SEEK URL":
-        url = st.text_input("SEEK job URL", placeholder="https://www.seek.com.au/job/...")
+    elif mode == "Search jobs":
+        adzuna_id = _secret("ADZUNA_APP_ID")
+        adzuna_key = _secret("ADZUNA_APP_KEY")
+        if not (adzuna_id and adzuna_key):
+            st.info(
+                "Job search needs Adzuna API credentials. Sign up free at "
+                "[developer.adzuna.com](https://developer.adzuna.com), then add "
+                "`ADZUNA_APP_ID` and `ADZUNA_APP_KEY` to your Streamlit Cloud Secrets."
+            )
+        else:
+            # Pre-fill suggestions from the loaded resume
+            suggested_q = job_search.suggest_keywords_from_resume(master_md) if master_md else ""
+            suggested_loc = job_search.suggest_location_from_resume(master_md) if master_md else "Australia"
+
+            col_a, col_b = st.columns([2, 1])
+            with col_a:
+                q = st.text_input(
+                    "Keywords",
+                    value=ss.get("search_query") or suggested_q,
+                    placeholder="e.g. SEO specialist, marketing manager",
+                    key="search_q_input",
+                )
+            with col_b:
+                loc = st.text_input(
+                    "Location",
+                    value=suggested_loc,
+                    placeholder="Sydney, Melbourne, Australia",
+                    key="search_loc_input",
+                )
+
+            public_only = st.checkbox(
+                "Government / public sector only",
+                value=False,
+                help=(
+                    "Filters the Adzuna search for jobs that mention government, council, "
+                    "department, ministry, public service, etc. Best-effort filter — "
+                    "no true government-only API exists publicly for AU."
+                ),
+            )
+
+            search_clicked = st.button("Search jobs", type="primary",
+                                       disabled=not q.strip())
+            if search_clicked:
+                try:
+                    label = "public sector" if public_only else "Adzuna"
+                    with st.spinner(f"Searching {label} for '{q}' in {loc or 'Australia'}..."):
+                        results = job_search.search_adzuna(
+                            adzuna_id, adzuna_key,
+                            what=q, where=loc or "Australia",
+                            results_per_page=20,
+                            public_sector_only=public_only,
+                        )
+                    ss["search_results"] = results
+                    ss["search_query"] = q
+                    if not results:
+                        st.warning("No jobs matched. Try different keywords or a broader location.")
+                except job_search.JobSearchError as e:
+                    st.error(f"Search failed: {e}")
+                    ss["search_results"] = None
+
+            # Render results
+            if ss.get("search_results"):
+                results = ss["search_results"]
+                st.caption(f"Found {len(results)} job(s). Click 'Tailor for this job' to load one.")
+                for idx, r in enumerate(results):
+                    with st.container(border=True):
+                        line1 = f"**{r['title']}** — {r['company'] or 'Unknown'}"
+                        st.markdown(line1)
+                        sub_bits = [b for b in (r["location"], r["salary"], r["source"], r["posted"]) if b]
+                        if sub_bits:
+                            st.caption(" · ".join(sub_bits))
+                        snippet = (r["description_snippet"] or "")[:300]
+                        if snippet:
+                            st.markdown(f"<small>{snippet}{'...' if len(r['description_snippet']) > 300 else ''}</small>",
+                                        unsafe_allow_html=True)
+                        c1, c2 = st.columns([1, 4])
+                        with c1:
+                            if st.button("Tailor this", key=f"pick_{idx}", type="primary"):
+                                job = job_search.result_to_job(r)
+                                ss["fetch_status"] = None
+                        with c2:
+                            if r["url"]:
+                                st.markdown(f"<small>[Open original posting]({r['url']})</small>",
+                                            unsafe_allow_html=True)
+
+    elif mode == "Job URL":
+        st.caption(
+            "Works for SEEK, Indeed, Glassdoor, and most company career pages that publish "
+            "structured job data. LinkedIn URLs typically fail (login required) — use the "
+            "Manual paste fallback that appears on failure."
+        )
+        url = st.text_input(
+            "Job URL",
+            placeholder="https://www.seek.com.au/job/... or any job posting URL",
+        )
         if st.button("Fetch job", disabled=not url.strip()):
             try:
                 fetched_job, missing = seek_fetch.fetch_from_url(url)
@@ -633,7 +728,13 @@ with st.container(border=True):
                 )
             elif kind == "failed":
                 st.error(f"Fetch failed: {err}")
-                st.info("Manual paste fallback — paste the description below.")
+                low = (attempted_url or "").lower()
+                hint = ""
+                if "linkedin" in low:
+                    hint = " (LinkedIn requires login — public LinkedIn job URLs can't be auto-fetched. Paste below.)"
+                elif "indeed" in low:
+                    hint = " (Indeed often blocks automated fetches. Try the paste fallback.)"
+                st.info(f"Manual paste fallback — paste the description below.{hint}")
                 pasted_job = _render_paste_form("fallback", source_ref=attempted_url)
                 if pasted_job is not None:
                     job = pasted_job
@@ -828,9 +929,9 @@ def _quick_downloads(bundle: dict[str, bytes], key_prefix: str) -> None:
     cols = st.columns(4)
     specs = [
         ("tailored_resume.pdf", "Resume (PDF)", "application/pdf"),
+        ("tailored_resume.docx", "Resume (DOCX)", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
         ("cover_note.pdf", "Cover (PDF)", "application/pdf"),
-        ("tailored_resume.md", "Resume (MD)", "text/markdown"),
-        ("cover_note.md", "Cover (MD)", "text/markdown"),
+        ("cover_note.docx", "Cover (DOCX)", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
     ]
     for col, (fname, label, mime) in zip(cols, specs):
         with col:
@@ -879,7 +980,7 @@ if MULTI_USER and ss["download_bundle"]:
             mime="application/zip",
         )
         st.caption(
-            "The zip also contains `match_summary.md`, `missing_requirements.md`, "
+            "The zip also contains `match_summary.docx`, `missing_requirements.docx`, "
             "`job.json`, and `application_meta.json`."
         )
 
@@ -969,16 +1070,7 @@ def _render_past_applications():
     with col_b:
         st.caption(f"`{choice.relative_to(ROOT)}`")
 
-    with st.expander("Preview the drafts", expanded=False):
-        for name in ("tailored_resume.md", "cover_note.md", "match_summary.md", "missing_requirements.md"):
-            path = choice / name
-            if path.exists():
-                st.markdown(f"**{name}**")
-                try:
-                    st.markdown(path.read_text(encoding="utf-8"))
-                except OSError as e:
-                    st.error(f"Could not read {name}: {e}")
-                st.divider()
+    st.caption("Download files above to view contents (open .docx in Word, .pdf in any PDF viewer).")
 
 
 if not MULTI_USER:
