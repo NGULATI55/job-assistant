@@ -380,8 +380,10 @@ ss.setdefault("tailor_error", None)
 ss.setdefault("last_upload_marker", None)
 ss.setdefault("selected_style", exporter.DEFAULT_STYLE)
 # Multi-user mode keeps resumes in memory keyed by filename.
+# We start empty — visitors must upload their own resume before tailoring
+# or searching. The built-in template was confusing on the hosted version.
 if MULTI_USER:
-    ss.setdefault("resumes", {"example.md": resume_loader.builtin_example()})
+    ss.setdefault("resumes", {})
 
 
 # --- API key resolution -------------------------------------------------
@@ -446,13 +448,17 @@ with st.sidebar:
                     st.error(f"Could not accept upload: {e}")
 
         names = sorted(ss["resumes"].keys())
-        chosen_name = st.selectbox(
-            "Your resumes",
-            options=names,
-            format_func=_format_resume_label,
-            key="resume_pick",
-        )
-        master_md = ss["resumes"].get(chosen_name, "")
+        if names:
+            chosen_name = st.selectbox(
+                "Your resumes",
+                options=names,
+                format_func=_format_resume_label,
+                key="resume_pick",
+            )
+            master_md = ss["resumes"].get(chosen_name, "")
+        else:
+            chosen_name = ""
+            master_md = ""
     else:
         # Disk-based personal mode
         if uploaded is not None:
