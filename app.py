@@ -611,8 +611,10 @@ if not api_key:
 # --- Helpers ------------------------------------------------------------
 
 def _step_header(num: int, title: str) -> None:
+    # The id lets us scroll-to-this-step via a postMessage to the parent
+    # WordPress page (see the components.html block at the end of the file).
     st.markdown(
-        f'<h3 style="margin-top:1.2rem;">'
+        f'<h3 id="tra-step-{num}" style="margin-top:1.2rem;">'
         f'<span class="step-num">{num}</span>{title}</h3>',
         unsafe_allow_html=True,
     )
@@ -938,6 +940,10 @@ if job is not None:
     ss["saved"] = None
     ss["download_bundle"] = None
     ss["tailor_error"] = None
+    # Auto-scroll the WP page (or local viewport) to Step 2 on the next rerun,
+    # so picking "Tailor this" / "Load sample" / "Use this job" doesn't leave
+    # the user stranded near the top.
+    ss["pending_scroll_step"] = 2
 
 
 # --- Step 2: job summary + company panel --------------------------------
@@ -1002,6 +1008,8 @@ if ss["job"]:
                     )
                     ss["saved"] = None
                     ss["download_bundle"] = None
+                    # After draft generates, jump to the Review section.
+                    ss["pending_scroll_step"] = 4
                 except tailor.TailorError as e:
                     ss["tailor_error"] = str(e)
 
@@ -1104,6 +1112,8 @@ if ss["draft"]:
                     style=picked_style,
                 )
                 ss["download_bundle"] = None
+            # After approval, jump down to the Downloads/confirmation section.
+            ss["pending_scroll_step"] = 6
 
 
 # --- Step 6: download / save confirmation -------------------------------
@@ -1147,6 +1157,7 @@ if MULTI_USER and ss["download_bundle"]:
     folder_name = saver.application_folder_name(ss["job"])
     zip_bytes = _build_zip(bundle, folder_name)
 
+    _step_header(6, "Downloads")
     with st.container(border=True):
         st.success("Your application bundle is ready.")
         st.caption(f"Template: **{exporter.STYLES[current_style]['name']}** — change above to regenerate.")
@@ -1175,6 +1186,7 @@ if (not MULTI_USER) and ss["saved"]:
     # Rebuild fresh in the currently-selected style for the download buttons.
     fresh_bundle, _ = _rebuild_current_bundle(current_style)
 
+    _step_header(6, "Downloads")
     with st.container(border=True):
         st.success(f"Saved · `{saved['folder'].name}`")
         st.caption(
@@ -1272,3 +1284,49 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+
+# --- Auto-scroll to active step ----------------------------------------
+# When a user clicks "Tailor this" / "Generate" / "Approve", the page reruns
+# and the next step container renders further down. Without help, the visitor
+# stays at the top and has to scroll manually. The block below fires a tiny
+# postMessage out to the embedding WordPress page (or scrolls the local
+# viewport directly) so the next step jumps into view.
+_pending_step = ss.pop("pending_scroll_step", None)
+if _pending_step:
+    st.components.v1.html(
+        f"""
+        <script>
+        (function () {{
+            // Wait a tick for the parent Streamlit DOM to settle, then locate
+            // the step header we want to scroll to.
+            setTimeout(function () {{
+                try {{
+                    var streamlitDoc = window.parent.document;
+                    var el = streamlitDoc.getElementById("tra-step-{_pending_step}");
+                    if (!el) return;
+                    var rect = el.getBoundingClientRect();
+                    var offsetTop = rect.top + (window.parent.scrollY || 0);
+
+                    // Case 1: running embedded in WordPress (cross-origin grandparent).
+                    // postMessage to the WP page, which has a listener that scrolls
+                    // its viewport so this offset becomes visible.
+                    try {{
+                        window.parent.parent.postMessage(
+                            {{ type: "tra:scroll", offsetTop: offsetTop }},
+                            "*"
+                        );
+                    }} catch (e) {{ /* not embedded — fine */ }}
+
+                    // Case 2: opened directly (not in WP). Scroll the Streamlit
+                    // viewport itself so the local user also gets the jump.
+                    try {{
+                        el.scrollIntoView({{ behavior: "smooth", block: "start" }});
+                    }} catch (e) {{ /* old browsers */ }}
+                }} catch (e) {{ /* cross-origin or DOM not ready — silently ignore */ }}
+            }}, 120);
+        }})();
+        </script>
+        """,
+        height=0,
+    )
