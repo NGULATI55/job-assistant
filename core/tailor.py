@@ -205,6 +205,109 @@ sentence length — mix short 5-9 word sentences with longer ones. AI
 detectors flag uniform rhythm.
 
 ===========================================================================
+AUSTRALIAN ENGLISH  (mandatory — recruiters here notice US spellings instantly)
+===========================================================================
+All output must use Australian English spelling, punctuation, and idiom.
+
+Spelling rules:
+  - -ise / -isation NEVER -ize / -ization
+      organise, organisation, organisational
+      optimise, optimisation
+      analyse, analysed, analyser
+      recognise, recognised
+      prioritise, prioritised
+      emphasise
+      finalise
+      centralise
+      utilise
+      categorise
+      characterise
+      digitise
+      strategise (rare; prefer "set strategy")
+  - -our NEVER -or
+      colour, behaviour, favour, favourite, honour, labour, neighbour,
+      vapour, harbour, endeavour, flavour, rumour
+  - -re NEVER -er
+      centre, metre (unit of length), theatre, fibre, calibre, litre, sombre
+      (but: "meter" is OK only for a measuring device — water meter, gas meter)
+  - -ce NEVER -se (for the noun)
+      defence, offence, pretence
+      licence (noun) vs license (verb): "my driver's licence" / "we license the software"
+      practice (noun) vs practise (verb): "in practice" / "I practise daily"
+  - Double the L before -ed / -ing / -er when the stem ends in a single vowel + L:
+      travelled, travelling, traveller
+      modelled, modelling
+      levelled
+      cancelled, cancellation
+      labelled
+      counselled
+      signalled
+  - Programme (TV / event / training programme) vs program (computer code only).
+  - Catalogue, dialogue, monologue (NEVER catalog, dialog, monolog — even on web UIs).
+  - Spelled / dreamed are acceptable; "spelt" / "dreamt" are the older AU forms.
+  - "Whilst" reads as formal/old-fashioned; prefer "while".
+
+AU vocabulary (use the AU form, not the US one):
+  mobile phone (not "cell phone"), holiday (not "vacation"), uni (informal) /
+  university, CV or resume (both fine), petrol (not "gas"), ute, courgette
+  (not "zucchini" — actually no, AU uses zucchini, ignore this one), lift
+  (not "elevator"), tap (not "faucet"), capsicum (not "bell pepper"),
+  rubbish (not "trash"), full stop (not "period"), brackets (not "parentheses"
+  unless being formal).
+
+Punctuation:
+  - Single quote marks for primary quotes, double for nested: 'Jane said "hi" then left.'
+    (US is the reverse. AU follows UK convention.)
+  - Full stop placement: outside the quote unless the quote itself is a full sentence.
+  - The Oxford comma is optional in AU English; pick one style and stay consistent
+    inside any one document. Default to NO Oxford comma unless ambiguity demands it.
+  - Use lowercase "am" / "pm" with a space: "9 am", "5 pm". Or 24-hour: "09:00".
+
+Dates and numbers:
+  - Date format: "17 May 2026" or "May 2026" (NEVER "May 17, 2026" — that's US).
+  - Number format: comma thousands separator, full stop decimal: 12,500   |   3.14
+  - Currency: AUD / A$ / AU$ — pick one. Default to AU$ in prose, AUD in tables.
+  - Percentages: "12%" not "12 percent".
+
+Grammar self-check (run mentally before returning):
+  - Subject-verb agreement (the team IS, not the team ARE in AU formal register;
+    BUT "Acme were acquired" sounds wrong — use "Acme was acquired").
+  - Tense consistency within each role: past tense for past roles, present tense
+    for current role. No mixing.
+  - "a" vs "an" by SOUND, not letter: a university, an hour, an honest, a unique,
+    an MBA, a UK firm, an FBI agent.
+  - Plurals: "data" is treated as a singular mass noun in modern AU business
+    English ("the data is..."). Avoid "the data are" — sounds American/academic.
+  - "Different from" or "different to" — both fine in AU. Avoid "different than"
+    (US).
+  - "On the weekend" (AU/UK) not "on weekends" (US-leaning).
+
+===========================================================================
+FINAL POLISH PASS  (mandatory — do this before returning)
+===========================================================================
+Re-read your output once more and silently fix any of:
+  1. US spellings that slipped through (organize, color, center, defense, etc.)
+     -> rewrite to AU.
+  2. US punctuation (double quotes for primary, period inside quote, etc.)
+     -> rewrite to AU.
+  3. Banned phrases (see list below) that survived.
+  4. Long dashes (em or en) in PROSE (date ranges aside) -> replace with
+     comma, full stop, or parens.
+  5. Weak verbs at the start of bullets ("responsible for", "helped with",
+     "worked on") -> rewrite with a strong verb that still tells the truth.
+  6. Generic adjectives ("dedicated", "passionate", "skilled") that tell
+     instead of show -> replace with a concrete fact.
+  7. "a" vs "an" by sound errors.
+  8. Tense mixing within a single role.
+  9. Subject-verb / plural agreement.
+  10. Any sentence in the cover note that could appear in any cover note for
+      any role -> rewrite with role-specific detail.
+
+If any of (1)-(10) cannot be fixed because the master resume doesn't supply
+the underlying detail, surface the gap in improvement_suggestions rather
+than leaving the weak text in place.
+
+===========================================================================
 STYLE BANS  (recruiters and AI-detectors filter these phrases)
 ===========================================================================
 Forbidden anywhere in resume or cover note:
@@ -282,16 +385,18 @@ the resume) or "they". NEVER write "the master resume", "the source document",
 review.
 
 ===========================================================================
-HUMAN VOICE FINAL CHECK
+HUMAN VOICE  (anti-detection rhythm; covers what the polish pass doesn't)
 ===========================================================================
-Before returning, re-read your output and verify:
-  - "a" vs "an" matches consonant vs vowel SOUND (a Melbourne-based, an honest).
-  - Subject-verb and tense agreement throughout.
-  - Sentence length varies — no two adjacent sentences with identical structure.
-  - Every bullet starts with a strong verb in the right tense.
-  - No banned phrases survived.
-  - No long dashes survived (date ranges aside).
-  - The cover note opener is NOT formulaic.
+After the spelling / grammar polish above, also check:
+  - Sentence length varies — no two adjacent sentences with identical structure
+    or length. AI detectors flag uniform rhythm; humans are uneven.
+  - Cover note opener is NOT formulaic. The first sentence after the greeting
+    must be a concrete fact specific to this role or company, not the
+    candidate's job title or years of experience.
+  - A few contractions in the cover note ("I've", "I'm", "we're") read more
+    naturally than the fully-spelled-out forms.
+  - The candidate is referred to by FIRST NAME or "they" in the match_summary,
+    never as "the candidate" or "the master resume".
 """
 
 
