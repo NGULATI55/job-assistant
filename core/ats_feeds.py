@@ -52,6 +52,9 @@ _PATTERNS: list[tuple[str, str]] = [
     (r"jobs\.ashbyhq\.com/([\w.-]+)", "ashby"),
     # SmartRecruiters
     (r"(?:jobs|careers)\.smartrecruiters\.com/([\w.-]+)", "smartrecruiters"),
+    # Lisnic — AU/NZ widget; data embedded in Next.js __NEXT_DATA__ block
+    (r"(?:www\.)?lisnic\.com/widget/jobs/([\w.-]+)", "lisnic"),
+    (r"(?:www\.)?lisnic\.com/jobs/business/([\w.-]+)", "lisnic"),
 ]
 
 
@@ -316,6 +319,7 @@ def fetch_jobs(platform: str, slug: str) -> tuple[str, list[CompanyJobResult]]:
         "workable": _fetch_workable,
         "ashby": _fetch_ashby,
         "smartrecruiters": _fetch_smartrecruiters,
+        "lisnic": _fetch_lisnic,
     }
     fn = handlers.get(platform)
     if not fn:
@@ -443,6 +447,85 @@ def _fetch_ashby(slug: str) -> tuple[str, list[CompanyJobResult]]:
     return company_name, results
 
 
+def _fetch_lisnic(slug: str) -> tuple[str, list[CompanyJobResult]]:
+    """Lisnic (Australian/NZ job widget). Data lives in <script id="__NEXT_DATA__">."""
+    url = f"https://www.lisnic.com/widget/jobs/{slug}"
+    try:
+        resp = requests.get(url, headers={"User-Agent": _USER_AGENT}, timeout=15)
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        raise ATSError(f"Lisnic fetch failed: {e}") from e
+
+    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.+?)</script>', resp.text, re.DOTALL)
+    if not m:
+        raise ATSError("Lisnic widget didn't return the expected data block.")
+    try:
+        import json as _json
+        data = _json.loads(m.group(1))
+    except Exception as e:  # noqa: BLE001
+        raise ATSError(f"Lisnic data unparseable: {e}") from e
+
+    page_props = (data.get("props") or {}).get("pageProps") or {}
+    business = page_props.get("business") or {}
+    posts = page_props.get("posts") or []
+    company_name = business.get("name") or slug.replace("-", " ").title()
+
+    work_type_label = {
+        "FULL_TIME": "Full-time", "PART_TIME": "Part-time",
+        "CONTRACT": "Contract", "CASUAL": "Casual", "INTERNSHIP": "Internship",
+    }
+
+    results: list[CompanyJobResult] = []
+    for p in posts:
+        # Location string
+        loc_info = p.get("post_location_info") or {}
+        if isinstance(loc_info, dict):
+            loc = ", ".join(filter(None, [
+                loc_info.get("city"), loc_info.get("state"), loc_info.get("country"),
+            ]))
+        else:
+            loc = ""
+        remote_type = (p.get("remote_type") or "").upper()
+        if remote_type and remote_type != "ONSITE":
+            loc = f"{loc} ({remote_type.title()})" if loc else remote_type.title()
+
+        # Salary string
+        salary = ""
+        if not p.get("is_salary_hidden"):
+            smin, smax = p.get("salary_range_min"), p.get("salary_range_max")
+            if smin and smax and int(smin) > 0:
+                disp = (p.get("salary_display_type") or "ANNUAL").upper()
+                period = "per year" if disp == "ANNUAL" else disp.lower()
+                salary = f"AUD {int(smin):,} - {int(smax):,} {period}"
+
+        # Description from post_metum
+        post_meta = p.get("post_metum") or {}
+        description = ""
+        if isinstance(post_meta, dict):
+            description = post_meta.get("description") or ""
+        description = _strip_html_text(description)
+
+        # Public job page URL
+        job_id = p.get("id")
+        job_url = f"https://www.lisnic.com/jobs/{job_id}" if job_id else url
+
+        result: CompanyJobResult = {
+            "title": str(p.get("title", "")).strip(),
+            "company": company_name,
+            "location": loc.strip(),
+            "department": "",
+            "posted": str(p.get("published_at") or p.get("created_at", ""))[:10],
+            "url": job_url,
+            "source": "Lisnic",
+            "description": description,
+        }
+        # Stash extras for result_to_job() — TypedDict tolerates extra keys at runtime.
+        result["salary"] = salary  # type: ignore[typeddict-unknown-key]
+        result["employment_type"] = work_type_label.get(p.get("work_type", ""), "")  # type: ignore[typeddict-unknown-key]
+        results.append(result)
+    return company_name, results
+
+
 def _fetch_smartrecruiters(slug: str) -> tuple[str, list[CompanyJobResult]]:
     """SmartRecruiters: GET /v1/companies/{slug}/postings"""
     data = _safe_get_json(f"https://api.smartrecruiters.com/v1/companies/{slug}/postings?limit=100")
@@ -468,6 +551,203 @@ def _fetch_smartrecruiters(slug: str) -> tuple[str, list[CompanyJobResult]]:
     return company_name, results
 
 
+# --- Universal LLM-based job extractor ----------------------------------
+# Used when no known ATS is detected. Claude reads any careers page and
+# returns a structured list of jobs.
+
+_LLM_EXTRACT_JOBS_SYSTEM = """You extract currently-open job postings from a company's careers page HTML.
+
+Return ONE JSON object only. No prose, no code fences. Schema:
+{
+  "company": "Company name as shown on the page (string)",
+  "jobs": [
+    {
+      "title": "Job title",
+      "location": "City / Remote / Hybrid etc, or empty string",
+      "department": "Team or department if visible, or empty string",
+      "url": "Direct link to the job posting / apply page if visible, or empty string. Must be a full URL starting with https://, NOT a relative path.",
+      "description": "1-3 sentence summary of the role if visible, or empty string"
+    }
+  ]
+}
+
+Rules:
+- Only include POSITIONS BEING ACTIVELY ADVERTISED — real job titles with details.
+- DON'T include "send us your CV", "future opportunities", "general application" CTAs.
+- DON'T include role categories ("Engineering", "Marketing") without a specific position name.
+- DON'T invent jobs or URLs. If the page has no clear listings, return jobs: [].
+- For URLs: if you see a relative path like "/jobs/123", combine with the base URL to make it absolute. If you can't determine the absolute URL, leave it empty.
+- Limit output to the 50 most prominent / recent jobs on the page.
+"""
+
+
+def find_company_jobs(
+    url: str,
+    api_key: str | None = None,
+) -> tuple[str, list[CompanyJobResult], str]:
+    """Universal entry point — get jobs for any company URL.
+
+    Returns (company_name, jobs, method_used) where method_used is one of:
+      "ats:<platform>"   — direct ATS API
+      "llm"              — Claude extraction from page HTML
+    Raises ATSError if everything fails.
+    """
+    # 1) ATS detection + direct API (fast, free, structured)
+    detection = detect_ats_from_homepage(url, api_key=api_key)
+    if detection:
+        platform, slug = detection
+        name, jobs = fetch_jobs(platform, slug)
+        return name, jobs, f"ats:{platform}"
+
+    # 2) LLM extraction fallback
+    if not api_key or not api_key.strip():
+        raise ATSError(
+            "No supported ATS detected and no Anthropic API key for the LLM fallback. "
+            "Paste a known ATS URL directly, or configure an API key."
+        )
+    name, jobs = _fetch_jobs_via_llm(url, api_key.strip())
+    return name, jobs, "llm"
+
+
+def _fetch_jobs_via_llm(url: str, api_key: str) -> tuple[str, list[CompanyJobResult]]:
+    """Generic scraper: find the careers page, send to Claude, parse jobs."""
+    # Find the careers page (reuse the discovery logic from detect_ats_from_homepage)
+    headers = {"User-Agent": _USER_AGENT, "Accept-Language": "en-AU,en;q=0.9"}
+
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+
+    final_url = url
+    final_html = ""
+    try:
+        r = requests.get(url, timeout=15, headers=headers, allow_redirects=True)
+        if r.status_code == 200:
+            final_url = r.url
+            final_html = r.text
+    except requests.RequestException as e:
+        raise ATSError(f"Couldn't fetch the page: {e}") from e
+
+    if not final_html:
+        raise ATSError("Page returned no usable HTML.")
+
+    # If the supplied URL clearly isn't already a careers page, follow careers links
+    looks_like_careers = any(s in final_url.lower() for s in ("career", "job", "join", "opportun"))
+    if not looks_like_careers:
+        candidates = _find_careers_links(final_html, base_url=final_url)
+        from urllib.parse import urlparse  # noqa: PLC0415
+        parsed = urlparse(final_url)
+        if parsed.netloc:
+            candidates.extend([
+                f"{parsed.scheme}://{parsed.netloc}/careers",
+                f"{parsed.scheme}://{parsed.netloc}/jobs",
+                f"{parsed.scheme}://careers.{parsed.netloc}",
+                f"{parsed.scheme}://jobs.{parsed.netloc}",
+            ])
+        for cand in candidates[:5]:
+            try:
+                cr = requests.get(cand, timeout=15, headers=headers, allow_redirects=True)
+                if cr.status_code == 200 and len(cr.text) > 1000:
+                    final_url = cr.url
+                    final_html = cr.text
+                    break
+            except requests.RequestException:
+                continue
+
+    # Strip noise from HTML before sending to Claude
+    soup = BeautifulSoup(final_html, "html.parser")
+    for tag in soup(["script", "style", "noscript", "form", "iframe"]):
+        tag.decompose()
+    text_blob = str(soup)[:18000]  # ~5k tokens, keeps Claude cost predictable
+
+    if len(text_blob.strip()) < 200:
+        raise ATSError(
+            "The page didn't return enough HTML content. It may be a JavaScript-only "
+            "page where job data is loaded dynamically — try the company's actual ATS URL "
+            "(boards.greenhouse.io/..., jobs.lever.co/...) if you know it."
+        )
+
+    try:
+        import anthropic  # lazy
+    except ImportError as e:
+        raise ATSError("anthropic package not installed.") from e
+
+    client = anthropic.Anthropic(api_key=api_key)
+    try:
+        msg = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=4000,
+            system=_LLM_EXTRACT_JOBS_SYSTEM,
+            messages=[{"role": "user", "content": f"CAREERS PAGE URL: {final_url}\n\nHTML:\n{text_blob}"}],
+        )
+    except anthropic.APIError as e:
+        raise ATSError(f"Anthropic API error during job extraction: {e}") from e
+    except Exception as e:  # noqa: BLE001
+        raise ATSError(f"Unexpected error calling Anthropic: {e}") from e
+
+    raw = "".join(getattr(b, "text", "") for b in msg.content if getattr(b, "type", None) == "text").strip()
+    if raw.startswith("```"):
+        if "\n" in raw:
+            raw = raw.split("\n", 1)[1]
+        if raw.endswith("```"):
+            raw = raw.rsplit("```", 1)[0]
+        raw = raw.strip()
+
+    import json as _json
+    try:
+        data = _json.loads(raw)
+    except _json.JSONDecodeError:
+        s, e = raw.find("{"), raw.rfind("}")
+        if s == -1 or e <= s:
+            raise ATSError("Couldn't parse Claude's extraction output.")
+        try:
+            data = _json.loads(raw[s : e + 1])
+        except _json.JSONDecodeError as err:
+            raise ATSError(f"Couldn't parse Claude's extraction output: {err}") from err
+
+    if not isinstance(data, dict):
+        raise ATSError("Claude returned non-object output.")
+
+    company_name = str(data.get("company") or "").strip()
+    if not company_name:
+        # Fall back to the page <title> or domain name
+        try:
+            company_name = (BeautifulSoup(final_html, "html.parser").title.text or "").strip()
+        except Exception:  # noqa: BLE001
+            company_name = ""
+        if not company_name:
+            from urllib.parse import urlparse  # noqa: PLC0415
+            company_name = urlparse(final_url).netloc.replace("www.", "").split(".")[0].title()
+
+    raw_jobs = data.get("jobs") or []
+    if not isinstance(raw_jobs, list):
+        raise ATSError("Claude returned a non-list for the jobs field.")
+
+    results: list[CompanyJobResult] = []
+    for j in raw_jobs:
+        if not isinstance(j, dict):
+            continue
+        title = str(j.get("title") or "").strip()
+        if not title:
+            continue
+        job_url = str(j.get("url") or "").strip()
+        # Guard: if Claude returned a relative path, drop it (the prompt requested absolute)
+        if job_url and not job_url.startswith(("http://", "https://")):
+            job_url = ""
+        result: CompanyJobResult = {
+            "title": title,
+            "company": company_name,
+            "location": str(j.get("location") or "").strip(),
+            "department": str(j.get("department") or "").strip(),
+            "posted": "",
+            "url": job_url or final_url,
+            "source": "Web (Claude)",
+            "description": str(j.get("description") or "").strip(),
+        }
+        results.append(result)
+
+    return company_name, results
+
+
 # --- Conversion to standard Job dict for the tailor pipeline ------------
 
 def result_to_job(r: CompanyJobResult) -> Job:
@@ -478,8 +758,8 @@ def result_to_job(r: CompanyJobResult) -> Job:
         "company": r.get("company", "") or "Unknown company",
         "location": r.get("location", ""),
         "description": r.get("description", "") or r.get("title", ""),
-        "salary": "",
-        "employment_type": "",
+        "salary": r.get("salary", "") or "",  # populated by Lisnic when public
+        "employment_type": r.get("employment_type", "") or "",  # populated by Lisnic / Workable
         "company_industry": r.get("department", ""),
         "company_size": "",
         "company_profile_url": "",

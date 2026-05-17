@@ -710,8 +710,10 @@ with st.container(border=True):
             st.markdown("##### Watch specific companies")
             st.caption(
                 "Paste any URL of a company — their **homepage** (e.g. `canva.com`), their "
-                "**careers page**, or their **ATS board** directly. The app finds the careers "
-                "feed automatically. Supports Greenhouse, Lever, Workable, Ashby, SmartRecruiters."
+                "**careers page**, or their **ATS board** directly. The app finds and reads "
+                "the careers feed automatically. Direct ATS feeds (Greenhouse, Lever, Workable, "
+                "Ashby, SmartRecruiters, Lisnic) are instant + free. Other sites fall back to "
+                "Claude reading the page (~$0.02 per company)."
             )
             wc_col_a, wc_col_b = st.columns([4, 1])
             with wc_col_a:
@@ -729,33 +731,39 @@ with st.container(border=True):
                 )
 
             if add_clicked:
-                with st.spinner("Finding the company's careers feed..."):
-                    detection = ats_feeds.detect_ats_from_homepage(
-                        new_company_url,
-                        api_key=api_key or None,
-                    )
-                if not detection:
-                    st.error(
-                        "Couldn't find a supported ATS for that URL. The company may be on "
-                        "Workday, SAP, Taleo, or a custom careers system that we don't read. "
-                        "Supported platforms: Greenhouse, Lever, Workable, Ashby, SmartRecruiters."
-                    )
-                else:
-                    platform, slug = detection
-                    try:
-                        with st.spinner(f"Fetching jobs from {platform.title()}..."):
-                            company_name, ats_results = ats_feeds.fetch_jobs(platform, slug)
-                        ss["watched_companies"][slug] = {
-                            "platform": platform,
-                            "company_name": company_name,
-                            "jobs": ats_results,
-                        }
-                        if ats_results:
-                            st.success(f"Added **{company_name}** — {len(ats_results)} open role(s).")
-                        else:
-                            st.info(f"Added **{company_name}** but they have no open roles right now.")
-                    except ats_feeds.ATSError as e:
-                        st.error(f"Couldn't fetch from {platform.title()}: {e}")
+                try:
+                    with st.spinner("Finding and reading the company's careers feed..."):
+                        company_name, ats_results, method = ats_feeds.find_company_jobs(
+                            new_company_url,
+                            api_key=api_key or None,
+                        )
+                    # Pick a stable storage key: ATS slug if known, otherwise domain
+                    if method.startswith("ats:"):
+                        platform = method.split(":", 1)[1]
+                        # Derive slug from the first job URL or fall back to company name
+                        det = ats_feeds.detect_ats_from_homepage(new_company_url, api_key=api_key or None)
+                        slug_key = det[1] if det else company_name
+                    else:
+                        platform = "web"
+                        from urllib.parse import urlparse  # noqa: PLC0415
+                        slug_key = urlparse(
+                            new_company_url if new_company_url.startswith(("http://", "https://"))
+                            else "https://" + new_company_url
+                        ).netloc or company_name
+                    ss["watched_companies"][slug_key] = {
+                        "platform": platform,
+                        "company_name": company_name,
+                        "jobs": ats_results,
+                    }
+                    if ats_results:
+                        via = "direct ATS feed" if method.startswith("ats:") else "Claude reading the careers page"
+                        st.success(
+                            f"Added **{company_name}** — {len(ats_results)} open role(s) (via {via})."
+                        )
+                    else:
+                        st.info(f"Added **{company_name}** but no open roles were found on the page.")
+                except ats_feeds.ATSError as e:
+                    st.error(str(e))
 
             # Render watched companies
             if ss.get("watched_companies"):
