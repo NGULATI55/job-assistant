@@ -71,8 +71,7 @@ def extract_text(raw_name: str, data: bytes) -> str:
     if ext in (".txt", ".md"):
         return data.decode("utf-8", errors="replace")
     raise ValueError(
-        f"Unsupported resume format: '{ext}'. "
-        f"Use one of: {', '.join(SUPPORTED_EXTENSIONS)}"
+        f"That file type isn't supported. Please upload a PDF, Word doc, or text file."
     )
 
 
@@ -82,7 +81,7 @@ def _extract_pdf(data: bytes) -> str:
         import fitz  # PyMuPDF
     except ImportError as e:
         raise ValueError(
-            "PDF extraction requires PyMuPDF. Install with: pip install pymupdf"
+            "PDF uploads aren't available right now. Try a Word doc or text file."
         ) from e
     doc = fitz.open(stream=data, filetype="pdf")
     try:
@@ -92,8 +91,8 @@ def _extract_pdf(data: bytes) -> str:
     text = "\n\n".join(pages).strip()
     if not text:
         raise ValueError(
-            "Could not extract any text from this PDF. "
-            "If it's an image-only / scanned PDF, save it as text first."
+            "Couldn't read any text from this PDF. "
+            "If it's a scanned image, please save it as a Word doc or text file first."
         )
     return text
 
@@ -104,7 +103,7 @@ def _extract_docx(data: bytes) -> str:
         from docx import Document
     except ImportError as e:
         raise ValueError(
-            "DOCX extraction requires python-docx. Install with: pip install python-docx"
+            "Word uploads aren't available right now. Try a PDF or text file."
         ) from e
     doc = Document(io.BytesIO(data))
     parts: list[str] = []
@@ -136,7 +135,7 @@ def _extract_docx(data: bytes) -> str:
                         parts.append(t)
     out = "\n".join(parts).strip()
     if not out:
-        raise ValueError("Could not extract any text from this DOCX.")
+        raise ValueError("Couldn't read any text from this Word doc.")
     return out
 
 
@@ -150,8 +149,7 @@ def save_uploaded_resume(resumes_dir: Path, raw_name: str, data: bytes) -> Path:
     ext = Path(raw_name).suffix.lower()
     if ext not in SUPPORTED_EXTENSIONS:
         raise ValueError(
-            f"Unsupported format '{ext}'. "
-            f"Use one of: {', '.join(SUPPORTED_EXTENSIONS)}"
+            "That file type isn't supported. Please upload a PDF, Word doc, or text file."
         )
     text = extract_text(raw_name, data)
     name = safe_resume_name(raw_name)

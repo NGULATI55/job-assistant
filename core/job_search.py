@@ -63,8 +63,8 @@ def search_adzuna(
     """
     if not app_id.strip() or not app_key.strip():
         raise JobSearchError(
-            "Adzuna API credentials not configured. "
-            "Set ADZUNA_APP_ID and ADZUNA_APP_KEY in Streamlit Secrets."
+            "Job search isn't configured on this instance. "
+            "Use the Job URL or Manual paste option instead."
         )
     params: dict = {
         "app_id": app_id.strip(),
@@ -87,21 +87,21 @@ def search_adzuna(
     try:
         resp = requests.get(ADZUNA_BASE, params=params, timeout=20)
     except requests.RequestException as e:
-        raise JobSearchError(f"Network error: {e}") from e
+        raise JobSearchError("Job search isn't responding right now. Try again in a moment.") from e
     if resp.status_code == 401:
-        raise JobSearchError("Adzuna rejected the credentials. Check your APP_ID / APP_KEY.")
+        raise JobSearchError("Job search isn't configured correctly on this instance.")
     if resp.status_code == 429:
         raise JobSearchError(
-            "Adzuna monthly quota exceeded (free tier = 25 calls/month). "
-            "Wait until next month or upgrade your Adzuna plan."
+            "The job search has hit its monthly limit. "
+            "Try the Job URL or Manual paste option instead."
         )
     if resp.status_code >= 400:
-        raise JobSearchError(f"Adzuna error {resp.status_code}: {resp.text[:200]}")
+        raise JobSearchError("Job search isn't responding right now. Try again in a moment.")
 
     try:
         data = resp.json()
     except ValueError as e:
-        raise JobSearchError(f"Could not parse Adzuna response: {e}") from e
+        raise JobSearchError("Couldn't read the job search results. Try again in a moment.") from e
 
     return [_normalise_result(r) for r in data.get("results", [])]
 
@@ -281,15 +281,15 @@ def suggest_search_terms_from_resume(
     Raises JobSearchError on missing input / API error / unparseable output.
     """
     if not resume_text or not resume_text.strip():
-        raise JobSearchError("Resume is empty. Upload a resume before asking for suggestions.")
+        raise JobSearchError("Upload a resume first, then try the suggestion.")
     if not api_key or not api_key.strip():
-        raise JobSearchError("Anthropic API key is required for the resume-based suggestion.")
+        raise JobSearchError("This feature isn't available right now. Type your search terms manually.")
 
     try:
         import anthropic  # lazy import
     except ImportError as e:
         raise JobSearchError(
-            "The 'anthropic' package is not installed. Run: pip install -r requirements.txt"
+            "This feature isn't available right now. Type your search terms manually."
         ) from e
 
     client = anthropic.Anthropic(api_key=api_key.strip())
@@ -301,9 +301,9 @@ def suggest_search_terms_from_resume(
             messages=[{"role": "user", "content": f"RESUME:\n{resume_text}"}],
         )
     except anthropic.APIError as e:
-        raise JobSearchError(f"Anthropic API error: {e}") from e
+        raise JobSearchError("Couldn't generate a suggestion right now. Try again in a moment.") from e
     except Exception as e:  # noqa: BLE001
-        raise JobSearchError(f"Unexpected error calling Anthropic: {e}") from e
+        raise JobSearchError("Couldn't generate a suggestion right now. Try again in a moment.") from e
 
     raw = "".join(
         getattr(b, "text", "") for b in msg.content
@@ -324,14 +324,14 @@ def suggest_search_terms_from_resume(
     except json.JSONDecodeError:
         start, end = raw.find("{"), raw.rfind("}")
         if start == -1 or end <= start:
-            raise JobSearchError(f"Could not parse Claude's suggestion: {raw[:120]!r}")
+            raise JobSearchError("Couldn't generate a suggestion right now. Try again or type your search terms manually.")
         try:
             data = json.loads(raw[start : end + 1])
         except json.JSONDecodeError as e:
-            raise JobSearchError(f"Could not parse Claude's suggestion: {e}") from e
+            raise JobSearchError("Couldn't generate a suggestion right now. Try again or type your search terms manually.") from e
 
     if not isinstance(data, dict):
-        raise JobSearchError("Claude returned non-object output for the search suggestion.")
+        raise JobSearchError("Couldn't generate a suggestion right now. Try again or type your search terms manually.")
 
     return {
         "keywords": str(data.get("keywords", "")).strip()[:60],

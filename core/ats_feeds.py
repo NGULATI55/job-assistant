@@ -323,7 +323,7 @@ def fetch_jobs(platform: str, slug: str) -> tuple[str, list[CompanyJobResult]]:
     }
     fn = handlers.get(platform)
     if not fn:
-        raise ATSError(f"Unsupported platform: {platform}")
+        raise ATSError("This careers page isn't supported yet.")
     return fn(slug)
 
 
@@ -344,16 +344,16 @@ def _safe_get_json(url: str, *, post_body: dict | None = None, timeout: float = 
         resp.raise_for_status()
         return resp.json()
     except requests.RequestException as e:
-        raise ATSError(f"Network error: {e}") from e
+        raise ATSError("Couldn't reach the careers page. Try again in a moment.") from e
     except ValueError as e:  # JSON decode
-        raise ATSError(f"Response wasn't valid JSON: {e}") from e
+        raise ATSError("Couldn't read the response from the careers page.") from e
 
 
 def _fetch_greenhouse(slug: str) -> tuple[str, list[CompanyJobResult]]:
     """Greenhouse: GET /v1/boards/{slug}/jobs?content=true returns all open roles."""
     data = _safe_get_json(f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true")
     if not isinstance(data, dict):
-        raise ATSError("Greenhouse returned unexpected shape")
+        raise ATSError("Couldn't read the careers page right now.")
     company_name = (data.get("meta") or {}).get("title") or slug.replace("-", " ").title()
     results: list[CompanyJobResult] = []
     for j in data.get("jobs", []):
@@ -375,7 +375,7 @@ def _fetch_lever(slug: str) -> tuple[str, list[CompanyJobResult]]:
     """Lever: GET /v0/postings/{slug}?mode=json returns array."""
     data = _safe_get_json(f"https://api.lever.co/v0/postings/{slug}?mode=json")
     if not isinstance(data, list):
-        raise ATSError("Lever returned unexpected shape")
+        raise ATSError("Couldn't read the careers page right now.")
     company_name = slug.replace("-", " ").title()
     results: list[CompanyJobResult] = []
     for j in data:
@@ -400,7 +400,7 @@ def _fetch_workable(slug: str) -> tuple[str, list[CompanyJobResult]]:
         post_body={"query": "", "limit": 100},
     )
     if not isinstance(data, dict):
-        raise ATSError("Workable returned unexpected shape")
+        raise ATSError("Couldn't read the careers page right now.")
     results: list[CompanyJobResult] = []
     company_name = slug.replace("-", " ").title()
     for j in data.get("results", []):
@@ -430,7 +430,7 @@ def _fetch_ashby(slug: str) -> tuple[str, list[CompanyJobResult]]:
     """Ashby: GET /posting-api/job-board/{slug}?includeCompensation=true"""
     data = _safe_get_json(f"https://api.ashbyhq.com/posting-api/job-board/{slug}?includeCompensation=true")
     if not isinstance(data, dict):
-        raise ATSError("Ashby returned unexpected shape")
+        raise ATSError("Couldn't read the careers page right now.")
     company_name = slug.replace("-", " ").title()
     results: list[CompanyJobResult] = []
     for j in data.get("jobs", []):
@@ -454,16 +454,16 @@ def _fetch_lisnic(slug: str) -> tuple[str, list[CompanyJobResult]]:
         resp = requests.get(url, headers={"User-Agent": _USER_AGENT}, timeout=15)
         resp.raise_for_status()
     except requests.RequestException as e:
-        raise ATSError(f"Lisnic fetch failed: {e}") from e
+        raise ATSError("Couldn't reach that careers page. Try again in a moment.") from e
 
     m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.+?)</script>', resp.text, re.DOTALL)
     if not m:
-        raise ATSError("Lisnic widget didn't return the expected data block.")
+        raise ATSError("Couldn't read the careers page right now.")
     try:
         import json as _json
         data = _json.loads(m.group(1))
     except Exception as e:  # noqa: BLE001
-        raise ATSError(f"Lisnic data unparseable: {e}") from e
+        raise ATSError("Couldn't read the careers page right now.") from e
 
     page_props = (data.get("props") or {}).get("pageProps") or {}
     business = page_props.get("business") or {}
@@ -530,7 +530,7 @@ def _fetch_smartrecruiters(slug: str) -> tuple[str, list[CompanyJobResult]]:
     """SmartRecruiters: GET /v1/companies/{slug}/postings"""
     data = _safe_get_json(f"https://api.smartrecruiters.com/v1/companies/{slug}/postings?limit=100")
     if not isinstance(data, dict):
-        raise ATSError("SmartRecruiters returned unexpected shape")
+        raise ATSError("Couldn't read the careers page right now.")
     company_name = slug.replace("-", " ").title()
     results: list[CompanyJobResult] = []
     for j in data.get("content", []):
@@ -602,8 +602,8 @@ def find_company_jobs(
     # 2) LLM extraction fallback
     if not api_key or not api_key.strip():
         raise ATSError(
-            "No supported ATS detected and no Anthropic API key for the LLM fallback. "
-            "Paste a known ATS URL directly, or configure an API key."
+            "Couldn't read jobs from that careers page. "
+            "Try pasting the company's direct careers page URL."
         )
     name, jobs = _fetch_jobs_via_llm(url, api_key.strip())
     return name, jobs, "llm"
@@ -625,10 +625,10 @@ def _fetch_jobs_via_llm(url: str, api_key: str) -> tuple[str, list[CompanyJobRes
             final_url = r.url
             final_html = r.text
     except requests.RequestException as e:
-        raise ATSError(f"Couldn't fetch the page: {e}") from e
+        raise ATSError("Couldn't reach that page. Check the URL and try again.") from e
 
     if not final_html:
-        raise ATSError("Page returned no usable HTML.")
+        raise ATSError("That page didn't return any readable content.")
 
     # If the supplied URL clearly isn't already a careers page, follow careers links
     looks_like_careers = any(s in final_url.lower() for s in ("career", "job", "join", "opportun"))
@@ -661,15 +661,14 @@ def _fetch_jobs_via_llm(url: str, api_key: str) -> tuple[str, list[CompanyJobRes
 
     if len(text_blob.strip()) < 200:
         raise ATSError(
-            "The page didn't return enough HTML content. It may be a JavaScript-only "
-            "page where job data is loaded dynamically — try the company's actual ATS URL "
-            "(boards.greenhouse.io/..., jobs.lever.co/...) if you know it."
+            "Couldn't read jobs from that careers page. "
+            "Try the company's direct careers page URL."
         )
 
     try:
         import anthropic  # lazy
     except ImportError as e:
-        raise ATSError("anthropic package not installed.") from e
+        raise ATSError("Job search isn't available right now.") from e
 
     client = anthropic.Anthropic(api_key=api_key)
     try:
@@ -680,9 +679,9 @@ def _fetch_jobs_via_llm(url: str, api_key: str) -> tuple[str, list[CompanyJobRes
             messages=[{"role": "user", "content": f"CAREERS PAGE URL: {final_url}\n\nHTML:\n{text_blob}"}],
         )
     except anthropic.APIError as e:
-        raise ATSError(f"Anthropic API error during job extraction: {e}") from e
+        raise ATSError("Couldn't read jobs from that careers page right now. Try again in a moment.") from e
     except Exception as e:  # noqa: BLE001
-        raise ATSError(f"Unexpected error calling Anthropic: {e}") from e
+        raise ATSError("Couldn't read jobs from that careers page right now. Try again in a moment.") from e
 
     raw = "".join(getattr(b, "text", "") for b in msg.content if getattr(b, "type", None) == "text").strip()
     if raw.startswith("```"):
@@ -698,14 +697,14 @@ def _fetch_jobs_via_llm(url: str, api_key: str) -> tuple[str, list[CompanyJobRes
     except _json.JSONDecodeError:
         s, e = raw.find("{"), raw.rfind("}")
         if s == -1 or e <= s:
-            raise ATSError("Couldn't parse Claude's extraction output.")
+            raise ATSError("Couldn't read jobs from that careers page. Try the company's direct careers page URL.")
         try:
             data = _json.loads(raw[s : e + 1])
         except _json.JSONDecodeError as err:
-            raise ATSError(f"Couldn't parse Claude's extraction output: {err}") from err
+            raise ATSError("Couldn't read jobs from that careers page. Try the company's direct careers page URL.") from err
 
     if not isinstance(data, dict):
-        raise ATSError("Claude returned non-object output.")
+        raise ATSError("Couldn't read jobs from that careers page. Try the company's direct careers page URL.")
 
     company_name = str(data.get("company") or "").strip()
     if not company_name:
@@ -720,7 +719,7 @@ def _fetch_jobs_via_llm(url: str, api_key: str) -> tuple[str, list[CompanyJobRes
 
     raw_jobs = data.get("jobs") or []
     if not isinstance(raw_jobs, list):
-        raise ATSError("Claude returned a non-list for the jobs field.")
+        raise ATSError("Couldn't read jobs from that careers page. Try the company's direct careers page URL.")
 
     results: list[CompanyJobResult] = []
     for j in raw_jobs:

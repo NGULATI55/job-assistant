@@ -122,19 +122,18 @@ def _tailor_with_claude(
     resolved_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
     if not resolved_key.strip():
         raise TailorError(
-            "No Anthropic API key. Paste your key in the sidebar under "
-            "'2. Anthropic API key'. Get one at console.anthropic.com/settings/keys."
+            "No API key set. Paste your key in the sidebar, or enable Mock mode for a sample draft."
         )
     if not master_resume_md.strip():
         raise TailorError(
-            "Master resume is empty. Fill in data/master_resume.md before tailoring."
+            "Upload a resume before generating a draft."
         )
 
     try:
         import anthropic  # lazy import so offline tests run without the package
     except ImportError as e:
         raise TailorError(
-            "The 'anthropic' package is not installed. Run: pip install -r requirements.txt"
+            "Tailoring engine isn't available right now."
         ) from e
 
     client = anthropic.Anthropic(api_key=resolved_key)
@@ -150,9 +149,9 @@ def _tailor_with_claude(
             ],
         )
     except anthropic.APIError as e:
-        raise TailorError(f"Anthropic API error: {e}") from e
+        raise TailorError("Tailoring service is unavailable right now. Try again in a moment.") from e
     except Exception as e:  # noqa: BLE001 — surface anything else as a clean banner
-        raise TailorError(f"Unexpected error calling Anthropic: {e}") from e
+        raise TailorError("Tailoring service is unavailable right now. Try again in a moment.") from e
 
     raw = "".join(
         getattr(block, "text", "") for block in msg.content
@@ -201,23 +200,23 @@ def _parse_json_response(raw: str, *, is_mock: bool) -> TailoredResult:
         start = text.find("{")
         end = text.rfind("}")
         if start == -1 or end == -1 or end <= start:
-            raise TailorError("Model output was not parseable as JSON.")
+            raise TailorError("The draft came back in an unexpected format. Try again in a moment.")
         try:
             data = json.loads(text[start : end + 1])
         except json.JSONDecodeError as e:
-            raise TailorError(f"Model output was not parseable as JSON: {e}") from e
+            raise TailorError("The draft came back in an unexpected format. Try again in a moment.") from e
 
     return _validate_result(data, is_mock=is_mock)
 
 
 def _validate_result(data: object, *, is_mock: bool) -> TailoredResult:
     if not isinstance(data, dict):
-        raise TailorError("Model output was JSON but not an object.")
+        raise TailorError("The draft came back in an unexpected format. Try again in a moment.")
 
     required = ("tailored_resume_md", "cover_note_md", "match_summary", "missing_requirements")
     for key in required:
         if key not in data:
-            raise TailorError(f"Model output is missing required key: {key}")
+            raise TailorError("The draft came back incomplete. Try again in a moment.")
 
     resume = data["tailored_resume_md"]
     cover = data["cover_note_md"]
@@ -225,13 +224,13 @@ def _validate_result(data: object, *, is_mock: bool) -> TailoredResult:
     missing = data["missing_requirements"]
 
     if not isinstance(resume, str) or not resume.strip():
-        raise TailorError("tailored_resume_md must be a non-empty string.")
+        raise TailorError("The draft came back without a resume. Try again in a moment.")
     if not isinstance(cover, str) or not cover.strip():
-        raise TailorError("cover_note_md must be a non-empty string.")
+        raise TailorError("The draft came back without a cover note. Try again in a moment.")
     if not isinstance(summary, str):
-        raise TailorError("match_summary must be a string.")
+        raise TailorError("The draft came back in an unexpected format. Try again in a moment.")
     if not isinstance(missing, list) or not all(isinstance(x, str) for x in missing):
-        raise TailorError("missing_requirements must be a list of strings.")
+        raise TailorError("The draft came back in an unexpected format. Try again in a moment.")
 
     return {
         "tailored_resume_md": resume.strip(),

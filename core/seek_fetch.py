@@ -109,7 +109,7 @@ def fetch_from_url(
         )
         resp.raise_for_status()
     except requests.RequestException as e:
-        raise FetchError(f"Network error: {e}") from e
+        raise FetchError("Couldn't reach that page. Check the URL and try again.") from e
 
     # Force UTF-8: SEEK serves utf-8 but a missing/odd charset header can confuse requests.
     resp.encoding = resp.encoding or "utf-8"
@@ -129,14 +129,13 @@ def fetch_from_url(
                     job = _extract_via_llm(html, url, api_key.strip())
                 except Exception as e:  # noqa: BLE001
                     raise FetchError(
-                        "Couldn't extract structured job data from the page, and "
-                        f"the LLM fallback also failed: {e}"
+                        "Couldn't read the job details from that page. "
+                        "Try the manual paste option instead."
                     ) from e
             else:
                 raise FetchError(
-                    "Couldn't find structured job data on this page (no JSON-LD, "
-                    "no SEEK Redux blob). Set an Anthropic API key in the sidebar "
-                    "to enable LLM-powered extraction, or use the manual paste fallback."
+                    "Couldn't read the job details from that page. "
+                    "Try the manual paste option instead."
                 )
 
     missing = [f for f in REQUIRED_FIELDS if not job[f]]  # type: ignore[literal-required]
@@ -484,12 +483,12 @@ def _extract_via_llm(html: str, source_url: str, api_key: str) -> Job:
     text = text[:12000]
 
     if not text.strip():
-        raise FetchError("Page returned no usable text content.")
+        raise FetchError("That page didn't return any readable content.")
 
     try:
         import anthropic  # noqa: PLC0415 — lazy
     except ImportError as e:
-        raise FetchError("anthropic package not installed.") from e
+        raise FetchError("Tailoring engine isn't available right now.") from e
 
     client = anthropic.Anthropic(api_key=api_key)
     try:
@@ -500,7 +499,7 @@ def _extract_via_llm(html: str, source_url: str, api_key: str) -> Job:
             messages=[{"role": "user", "content": f"URL: {source_url}\n\nPAGE TEXT:\n{text}"}],
         )
     except anthropic.APIError as e:
-        raise FetchError(f"Anthropic API error during URL extraction: {e}") from e
+        raise FetchError("Couldn't read the job details from that page right now. Try again or paste the description manually.") from e
 
     raw = "".join(getattr(b, "text", "") for b in msg.content if getattr(b, "type", None) == "text").strip()
     if raw.startswith("```"):
@@ -515,22 +514,22 @@ def _extract_via_llm(html: str, source_url: str, api_key: str) -> Job:
     except json.JSONDecodeError:
         start, end = raw.find("{"), raw.rfind("}")
         if start == -1 or end <= start:
-            raise FetchError(f"LLM returned unparseable output: {raw[:120]!r}")
+            raise FetchError("Couldn't read the job details from that page. Try the manual paste option instead.")
         try:
             data = json.loads(raw[start : end + 1])
         except json.JSONDecodeError as e:
-            raise FetchError(f"LLM returned unparseable output: {e}") from e
+            raise FetchError("Couldn't read the job details from that page. Try the manual paste option instead.") from e
 
     if not isinstance(data, dict):
-        raise FetchError("LLM returned non-object output.")
+        raise FetchError("Couldn't read the job details from that page. Try the manual paste option instead.")
 
     title = _clean_text(data.get("title", ""))
     description = (data.get("description") or "").strip()
 
     if not title and not description:
         raise FetchError(
-            "Page didn't contain a job posting (or it required login). "
-            "Use the manual paste fallback."
+            "That page didn't look like a job posting (or it needed a login). "
+            "Try the manual paste option instead."
         )
 
     # Fold company_about into the description (under a "About the company" heading)

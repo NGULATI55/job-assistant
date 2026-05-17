@@ -130,7 +130,7 @@ def test_extract_text_rejects_unsupported_extension():
     try:
         resume_loader.extract_text("foo.rtf", b"data")
     except ValueError as e:
-        assert "Unsupported" in str(e)
+        assert "isn't supported" in str(e).lower() or "unsupported" in str(e).lower()
         return
     raise AssertionError("Expected ValueError for .rtf")
 
@@ -198,7 +198,7 @@ def test_save_uploaded_resume_rejects_unsupported_format():
         try:
             resume_loader.save_uploaded_resume(Path(td), "foo.rtf", b"data")
         except ValueError as e:
-            assert "Unsupported" in str(e)
+            assert "isn't supported" in str(e).lower() or "unsupported" in str(e).lower()
             return
     raise AssertionError("Expected ValueError for .rtf")
 

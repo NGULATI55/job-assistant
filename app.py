@@ -198,11 +198,11 @@ mode_label = "Hosted · session-only" if MULTI_USER else "Local · private"
 st.markdown(
     f"""
     <h1>Job Application Assistant
-        <span class="privacy-badge">{mode_label}</span>
+        <span class="privacy-badge">Private</span>
     </h1>
     <p style="color: #555; font-size: 1.05rem; margin-top: -0.5rem;">
-        Paste a SEEK job link, pick your resume, and get a tailored draft + short cover note for your review.
-        Nothing is submitted to SEEK or any employer.
+        Upload your resume, pick a job, and get a tailored draft + short cover note for your review.
+        Nothing is submitted on your behalf.
     </p>
     """,
     unsafe_allow_html=True,
@@ -441,7 +441,7 @@ with st.sidebar:
                     ss["resumes"][safe_name] = text
                     ss["last_upload_marker"] = marker
                     ss["resume_pick"] = safe_name  # auto-select the new upload
-                    st.success(f"Uploaded · `{uploaded.name}` ({len(text):,} chars extracted)")
+                    st.success(f"Resume uploaded ({len(text):,} chars)")
                 except ValueError as e:
                     st.error(f"Could not accept upload: {e}")
 
@@ -453,7 +453,6 @@ with st.sidebar:
             key="resume_pick",
         )
         master_md = ss["resumes"].get(chosen_name, "")
-        st.caption(f"In-memory only · {len(ss['resumes'])} resume(s) this session")
     else:
         # Disk-based personal mode
         if uploaded is not None:
@@ -465,7 +464,7 @@ with st.sidebar:
                     )
                     ss["last_upload_marker"] = marker
                     ss["resume_pick"] = saved_path.name  # auto-select the new upload
-                    st.success(f"Uploaded · `{uploaded.name}` saved as `{saved_path.name}`")
+                    st.success("Resume uploaded")
                 except (ValueError, OSError) as e:
                     st.error(f"Could not save: {e}")
 
@@ -480,39 +479,42 @@ with st.sidebar:
                 key="resume_pick",
             )
             master_md = resume_loader.load_resume_text(RESUMES_DIR / chosen_name)
-        st.caption(f"`{RESUMES_DIR.relative_to(ROOT)}/`")
 
     if master_md.strip():
-        st.success(f"Loaded `{chosen_name}` ({len(master_md):,} chars)")
+        st.success(f"Resume loaded ({len(master_md):,} chars)")
     elif chosen_name:
-        st.warning(f"`{chosen_name}` is empty — edit it before tailoring")
+        st.warning("Resume is empty — edit it before tailoring")
 
-    st.divider()
+    # If a fallback API key is preconfigured (env or Streamlit Secrets), use it
+    # silently and hide the API key + debug toggle from visitors.
+    _preconfigured_key = _resolve_api_key("")
 
-    # 2) API key
-    st.markdown("**2. Anthropic API key**")
-    api_key_input = st.text_input(
-        "API key",
-        type="password",
-        placeholder="sk-ant-...",
-        help="Get one at console.anthropic.com. Your key is used only for your session and never stored.",
-        key="api_key_input",
-    )
-    api_key = _resolve_api_key(api_key_input)
-    if api_key:
-        st.success(f"Key set (…{api_key[-4:]})")
+    if _preconfigured_key:
+        api_key = _preconfigured_key
+        use_mock = False
     else:
-        st.warning("No API key. Paste one above to enable real tailoring.")
+        st.divider()
+        st.markdown("**Anthropic API key**")
+        api_key_input = st.text_input(
+            "API key",
+            type="password",
+            placeholder="sk-ant-...",
+            help="Get one at console.anthropic.com. Your key is used only for your session and never stored.",
+            key="api_key_input",
+            label_visibility="collapsed",
+        )
+        api_key = _resolve_api_key(api_key_input)
+        if api_key:
+            st.success(f"Key set (…{api_key[-4:]})")
+        else:
+            st.warning("No API key. Paste one above to enable tailoring.")
 
-    st.divider()
-
-    # 3) Tailoring options
-    st.markdown("**3. Options**")
-    use_mock = st.checkbox(
-        "Use mock tailoring (debug)",
-        value=False,
-        help="Bypass the Anthropic API and return a hardcoded draft. Useful for UI testing.",
-    )
+        st.divider()
+        use_mock = st.checkbox(
+            "Use sample output (no API call)",
+            value=False,
+            help="Skip the Anthropic API and return a hardcoded draft. For testing only.",
+        )
 
     # 4) Sign out (only shown when the OTP gate is active)
     if ss.get("auth_ok") and ss.get("auth_email"):
@@ -527,29 +529,23 @@ with st.sidebar:
             st.rerun()
 
     # 5) About
-    with st.expander("About / privacy"):
+    with st.expander("Privacy"):
         st.markdown(
-            f"**Mode:** {mode_label}\n\n"
-            + (
-                "Each visitor's resume and outputs stay in their session memory. "
-                "Nothing is written to the host. Closing the tab clears everything."
+            (
+                "Your resume and any generated drafts stay in your browser session. "
+                "Nothing you upload is stored. Closing the tab clears everything.\n\n"
                 if MULTI_USER
-                else "Resumes live in `data/resumes/` and saved applications in "
-                "`data/applications/` on this machine. Nothing leaves the host except "
-                "the Anthropic API call."
+                else "Your resume and saved drafts are stored locally on this machine.\n\n"
             )
-            + "\n\n**No submission**: this tool never posts to SEEK or any employer. "
-            "You always apply manually."
+            + "**This tool never submits anything to SEEK or any employer.** "
+            "You always review the draft and apply manually."
         )
 
 
 # --- Onboarding banner (when no API key set) ----------------------------
 if not api_key:
     st.info(
-        "**Quick start** — paste an Anthropic API key in the sidebar to enable "
-        "real tailoring, or tick *Use mock tailoring (debug)* to try the flow without "
-        "spending tokens. Get a key at "
-        "[console.anthropic.com](https://console.anthropic.com/settings/keys)."
+        "**Quick start** — paste your API key in the sidebar to enable tailoring."
     )
 
 
@@ -599,16 +595,16 @@ _step_header(1, "Provide the job")
 with st.container(border=True):
     mode = st.radio(
         "Input mode",
-        options=["Mock", "Search jobs", "Job URL", "Manual paste"],
+        options=["Sample job", "Search jobs", "Job URL", "Manual paste"],
         horizontal=True,
         key="mode",
     )
 
     job: dict | None = None
 
-    if mode == "Mock":
-        st.caption("Built-in sample job. Use this to test the flow with no network.")
-        if st.button("Load mock job"):
+    if mode == "Sample job":
+        st.caption("A built-in sample so you can try the flow without uploading anything else.")
+        if st.button("Load sample"):
             job = seek_fetch.load_mock()
             ss["fetch_status"] = None
 
@@ -617,9 +613,8 @@ with st.container(border=True):
         adzuna_key = _secret("ADZUNA_APP_KEY")
         if not (adzuna_id and adzuna_key):
             st.info(
-                "Job search needs Adzuna API credentials. Sign up free at "
-                "[developer.adzuna.com](https://developer.adzuna.com), then add "
-                "`ADZUNA_APP_ID` and `ADZUNA_APP_KEY` to your Streamlit Cloud Secrets."
+                "Job search isn't available right now. "
+                "Use the Job URL or Manual paste option instead."
             )
         else:
             # Seed defaults using the heuristic extractor (regex). The smart button below
@@ -635,7 +630,7 @@ with st.container(border=True):
                     ss["suggest_error"] = "Upload a resume first."
                     return
                 if not api_key:
-                    ss["suggest_error"] = "Anthropic API key required (paste it in the sidebar)."
+                    ss["suggest_error"] = "Set an API key in the sidebar first."
                     return
                 try:
                     out = job_search.suggest_search_terms_from_resume(master_md, api_key)
@@ -653,7 +648,7 @@ with st.container(border=True):
                     "🪄 Suggest from my resume",
                     on_click=_on_resume_suggest,
                     disabled=not master_md.strip(),
-                    help="Claude reads your resume and picks the best search query.",
+                    help="Picks the best search terms based on your resume.",
                     use_container_width=True,
                 )
             if ss.get("suggest_error"):
@@ -679,9 +674,8 @@ with st.container(border=True):
                 "Government / public sector only",
                 value=False,
                 help=(
-                    "Filters the Adzuna search for jobs that mention government, council, "
-                    "department, ministry, public service, etc. Best-effort filter — "
-                    "no true government-only API exists publicly for AU."
+                    "Filters results to roles that mention government, council, "
+                    "department, ministry, or public service."
                 ),
             )
 
@@ -689,7 +683,7 @@ with st.container(border=True):
                                        disabled=not q.strip())
             if search_clicked:
                 try:
-                    label = "public sector" if public_only else "Adzuna"
+                    label = "public sector" if public_only else "jobs"
                     with st.spinner(f"Searching {label} for '{q}' in {loc or 'Australia'}..."):
                         results = job_search.search_adzuna(
                             adzuna_id, adzuna_key,
@@ -702,24 +696,21 @@ with st.container(border=True):
                     if not results:
                         st.warning("No jobs matched. Try different keywords or a broader location.")
                 except job_search.JobSearchError as e:
-                    st.error(f"Search failed: {e}")
+                    st.error(str(e))
                     ss["search_results"] = None
 
             # --- Watched companies (ATS feeds) ---
             st.divider()
             st.markdown("##### Watch specific companies")
             st.caption(
-                "Paste any URL of a company — their **homepage** (e.g. `canva.com`), their "
-                "**careers page**, or their **ATS board** directly. The app finds and reads "
-                "the careers feed automatically. Direct ATS feeds (Greenhouse, Lever, Workable, "
-                "Ashby, SmartRecruiters, Lisnic) are instant + free. Other sites fall back to "
-                "Claude reading the page (~$0.02 per company)."
+                "Paste any company URL — their homepage (e.g. `canva.com`), their careers "
+                "page, or a job board link. We'll find their open roles automatically."
             )
             wc_col_a, wc_col_b = st.columns([4, 1])
             with wc_col_a:
                 new_company_url = st.text_input(
                     "Company URL",
-                    placeholder="canva.com  or  https://boards.greenhouse.io/anthropic",
+                    placeholder="canva.com  or  company-careers-page-url",
                     key="watch_company_url",
                     label_visibility="collapsed",
                 )
@@ -756,19 +747,16 @@ with st.container(border=True):
                         "jobs": ats_results,
                     }
                     if ats_results:
-                        via = "direct ATS feed" if method.startswith("ats:") else "Claude reading the careers page"
-                        st.success(
-                            f"Added **{company_name}** — {len(ats_results)} open role(s) (via {via})."
-                        )
+                        st.success(f"Added **{company_name}** — {len(ats_results)} open role(s).")
                     else:
-                        st.info(f"Added **{company_name}** but no open roles were found on the page.")
+                        st.info(f"Added **{company_name}** but no open roles were found.")
                 except ats_feeds.ATSError as e:
                     st.error(str(e))
 
             # Render watched companies
             if ss.get("watched_companies"):
                 for slug, entry in list(ss["watched_companies"].items()):
-                    label = f"{entry['company_name']} — {len(entry['jobs'])} role(s) · via {entry['platform'].title()}"
+                    label = f"{entry['company_name']} — {len(entry['jobs'])} role(s)"
                     with st.expander(label, expanded=True):
                         rem_col, _ = st.columns([1, 5])
                         with rem_col:
@@ -831,11 +819,8 @@ with st.container(border=True):
 
     elif mode == "Job URL":
         st.caption(
-            "Paste any job URL — SEEK, Indeed, Glassdoor, a company's career page, an "
-            "agency posting, anything public. If structured data isn't on the page, "
-            "Claude reads the page and extracts the job details (uses ~$0.005 of your "
-            "Anthropic credit per fetch). LinkedIn job URLs still need a login so they "
-            "typically fail — use Manual paste for those."
+            "Paste any job URL — SEEK, Indeed, Glassdoor, a company's careers page, anything "
+            "public. LinkedIn URLs typically need a login — use Manual paste for those."
         )
         url = st.text_input(
             "Job URL",
@@ -863,14 +848,14 @@ with st.container(border=True):
                     + ". Continue, or switch to Manual paste."
                 )
             elif kind == "failed":
-                st.error(f"Fetch failed: {err}")
+                st.error(err)
                 low = (attempted_url or "").lower()
                 hint = ""
                 if "linkedin" in low:
-                    hint = " (LinkedIn requires login — public LinkedIn job URLs can't be auto-fetched. Paste below.)"
+                    hint = " (LinkedIn requires a login — please paste the job details below.)"
                 elif "indeed" in low:
-                    hint = " (Indeed often blocks automated fetches. Try the paste fallback.)"
-                st.info(f"Manual paste fallback — paste the description below.{hint}")
+                    hint = " (Indeed often blocks direct fetches — please paste the job details below.)"
+                st.info(f"Paste the job description below to continue.{hint}")
                 pasted_job = _render_paste_form("fallback", source_ref=attempted_url)
                 if pasted_job is not None:
                     job = pasted_job
@@ -907,10 +892,8 @@ if ss["job"]:
                 st.markdown("*" + " · ".join(sub_bits) + "*")
             with st.expander("Job description", expanded=False):
                 st.write(job["description"])
-            src_caption = f"Source: `{job['source']}`"
             if job.get("source_ref"):
-                src_caption += f" — {job['source_ref']}"
-            st.caption(src_caption)
+                st.caption(f"Source: {job['source_ref']}")
 
         with col_company:
             st.markdown("##### Company profile")
@@ -936,12 +919,12 @@ if ss["job"]:
                 for link in links:
                     st.markdown(f"- {link}")
             if not rows and not links:
-                st.caption("No company profile data available for this source.")
+                st.caption("No company profile details available.")
 
     # --- Step 3: generate -----------------------------------------------
     _step_header(3, "Generate tailored draft")
     with st.container(border=True):
-        btn_label = "Generate (mock)" if use_mock else "Generate with Claude"
+        btn_label = "Generate (sample)" if use_mock else "Generate tailored draft"
         if st.button(btn_label, type="primary", disabled=not master_md.strip()):
             ss["tailor_error"] = None
             ss["draft"] = None
@@ -961,8 +944,8 @@ if ss["job"]:
         if not master_md.strip():
             st.caption("Pick or upload a resume in the sidebar to enable Generate.")
         if ss["tailor_error"]:
-            st.error(f"Tailoring failed: {ss['tailor_error']}")
-            st.caption("Fix the issue (or flip the *Use mock tailoring* toggle) and click Generate again.")
+            st.error(ss["tailor_error"])
+            st.caption("Fix the issue above and click Generate again.")
 
 
 # --- Step 4: review + approval gate -------------------------------------
@@ -972,10 +955,9 @@ if ss["draft"]:
 
     with st.container(border=True):
         if draft.get("is_mock"):
-            st.info("**Mock mode** — the Anthropic API was NOT called. This draft is hardcoded.")
+            st.info("**Sample draft** — this is a placeholder, not a real Claude-generated tailoring.")
         st.warning(
-            "This is a DRAFT only. No files have been written yet. "
-            "Click **Approve** below to keep the output."
+            "This is a draft. Nothing has been saved yet — click **Approve** below to keep the output."
         )
 
         summary = draft.get("match_summary", "").strip()

@@ -153,10 +153,9 @@ def test_fetch_failure_raises_fetch_error(monkeypatch):
     monkeypatch.setattr(seek_fetch.requests, "get", boom)
     try:
         seek_fetch.fetch_from_url("https://www.seek.com.au/job/123")
-    except seek_fetch.FetchError as e:
-        assert "simulated" in str(e)
-    else:
-        raise AssertionError("Expected FetchError")
+    except seek_fetch.FetchError:
+        return
+    raise AssertionError("Expected FetchError")
 
 
 # --- SEEK_REDUX_DATA fallback -------------------------------------------
