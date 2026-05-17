@@ -709,15 +709,15 @@ with st.container(border=True):
             st.divider()
             st.markdown("##### Watch specific companies")
             st.caption(
-                "Paste a company's careers URL to fetch their current openings directly from their "
-                "ATS feed. Supports Greenhouse, Lever, Workable, Ashby, SmartRecruiters. "
-                "Examples: `https://jobs.lever.co/anthropic`, `https://boards.greenhouse.io/stripe`."
+                "Paste any URL of a company — their **homepage** (e.g. `canva.com`), their "
+                "**careers page**, or their **ATS board** directly. The app finds the careers "
+                "feed automatically. Supports Greenhouse, Lever, Workable, Ashby, SmartRecruiters."
             )
             wc_col_a, wc_col_b = st.columns([4, 1])
             with wc_col_a:
                 new_company_url = st.text_input(
-                    "Careers page URL",
-                    placeholder="https://jobs.lever.co/... or https://boards.greenhouse.io/...",
+                    "Company URL",
+                    placeholder="canva.com  or  https://boards.greenhouse.io/anthropic",
                     key="watch_company_url",
                     label_visibility="collapsed",
                 )
@@ -729,11 +729,16 @@ with st.container(border=True):
                 )
 
             if add_clicked:
-                detection = ats_feeds.detect_ats(new_company_url)
+                with st.spinner("Finding the company's careers feed..."):
+                    detection = ats_feeds.detect_ats_from_homepage(
+                        new_company_url,
+                        api_key=api_key or None,
+                    )
                 if not detection:
                     st.error(
-                        "Couldn't detect a supported ATS in that URL. Supported platforms: "
-                        "Greenhouse, Lever, Workable, Ashby, SmartRecruiters."
+                        "Couldn't find a supported ATS for that URL. The company may be on "
+                        "Workday, SAP, Taleo, or a custom careers system that we don't read. "
+                        "Supported platforms: Greenhouse, Lever, Workable, Ashby, SmartRecruiters."
                     )
                 else:
                     platform, slug = detection

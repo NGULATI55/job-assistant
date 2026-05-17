@@ -69,6 +69,240 @@ def detect_ats(url: str) -> tuple[str, str] | None:
     return None
 
 
+# --- Homepage → ATS discovery -------------------------------------------
+
+_CAREERS_HINTS = (
+    "career", "careers", "jobs", "join-us", "join us", "work-with-us",
+    "work with us", "opportunities", "hiring", "vacancies", "open-roles",
+    "open roles", "positions",
+)
+
+_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+
+
+def detect_ats_from_homepage(
+    homepage_url: str,
+    api_key: str | None = None,
+) -> tuple[str, str] | None:
+    """Auto-discover a company's ATS from their homepage or careers URL.
+
+    Strategy:
+    1. If the URL itself matches an ATS pattern → return immediately.
+    2. Fetch the URL, scan its HTML source for any ATS URL.
+    3. Find careers-page candidates in the page, follow each, scan again.
+    4. Optional LLM fallback (if api_key provided): ask Claude to identify the ATS.
+
+    Returns (platform, slug) on success, or None.
+    """
+    if not homepage_url or not homepage_url.strip():
+        return None
+
+    # 1) Maybe it's already an ATS URL
+    direct = detect_ats(homepage_url)
+    if direct:
+        return direct
+
+    # 2) Normalise URL
+    url = homepage_url.strip()
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+
+    headers = {"User-Agent": _USER_AGENT, "Accept-Language": "en-AU,en;q=0.9"}
+
+    # Fetch the supplied URL
+    pages_to_check: list[str] = [url]
+    visited: set[str] = set()
+    found: tuple[str, str] | None = None
+    final_html = ""
+
+    while pages_to_check and not found:
+        current = pages_to_check.pop(0)
+        if current in visited:
+            continue
+        visited.add(current)
+        try:
+            r = requests.get(current, timeout=15, headers=headers, allow_redirects=True)
+            if r.status_code != 200:
+                continue
+            html = r.text
+        except requests.RequestException:
+            continue
+
+        final_html = html  # keep last successful response for LLM fallback
+        found = _scan_ats_urls_in_html(html)
+        if found:
+            return found
+
+        # On the first hop, also collect careers candidates
+        if len(visited) <= 1:
+            careers_candidates = _find_careers_links(html, base_url=r.url)
+            pages_to_check.extend(careers_candidates[:3])
+            # Plus a few hardcoded common careers paths (SPA homepages often don't
+            # expose links in plain HTML, but the conventional URLs still work).
+            from urllib.parse import urlparse  # noqa: PLC0415
+            parsed = urlparse(r.url)
+            if parsed.netloc:
+                base = f"{parsed.scheme}://{parsed.netloc}"
+                pages_to_check.extend([
+                    f"{base}/careers",
+                    f"{base}/jobs",
+                    f"{base}/company/careers",
+                    f"{parsed.scheme}://careers.{parsed.netloc}",
+                    f"{parsed.scheme}://jobs.{parsed.netloc}",
+                ])
+
+    # 3) LLM fallback if a key is available
+    if not found and api_key and api_key.strip():
+        try:
+            candidate = _llm_detect_ats(final_html, url, api_key.strip())
+            if candidate:
+                # Verify the candidate by actually calling the ATS — Claude may
+                # hallucinate a slug, so we only trust it if the fetch works.
+                try:
+                    _ = fetch_jobs(candidate[0], candidate[1])
+                    found = candidate
+                except ATSError:
+                    found = None
+        except Exception:  # noqa: BLE001 — best effort, never raise from detection
+            return None
+
+    return found
+
+
+def _scan_ats_urls_in_html(html: str) -> tuple[str, str] | None:
+    """Scan an HTML blob for any URL/string matching a known ATS pattern."""
+    if not html:
+        return None
+    # Look in plain URLs + iframe srcs + script srcs
+    candidates = re.findall(r"https?://[^\s\"'<>)]+", html)
+    for cand in candidates:
+        m = detect_ats(cand)
+        if m:
+            return m
+    # Sometimes the slug is referenced without protocol — try a few common shapes
+    for pat, platform in _PATTERNS:
+        m = re.search(pat, html, re.IGNORECASE)
+        if m:
+            slug = m.group(1).strip("/").strip()
+            if slug:
+                return platform, slug
+    return None
+
+
+def _find_careers_links(html: str, base_url: str) -> list[str]:
+    """Find anchor tags that look like careers links. Returns absolute URLs, sorted by relevance."""
+    from urllib.parse import urljoin
+    soup = BeautifulSoup(html, "html.parser")
+    scored: list[tuple[int, str]] = []
+    for a in soup.find_all("a", href=True):
+        href = a.get("href", "")
+        text = a.get_text(strip=True).lower()
+        if not href or href.startswith(("mailto:", "tel:", "javascript:")):
+            continue
+        score = 0
+        href_l = href.lower()
+        for hint in _CAREERS_HINTS:
+            if hint in href_l:
+                score += 2
+            if hint in text:
+                score += 1
+        if score > 0:
+            full = urljoin(base_url, href)
+            scored.append((score, full))
+    scored.sort(key=lambda x: -x[0])
+    # Dedupe preserving order
+    seen: set[str] = set()
+    out: list[str] = []
+    for _, u in scored:
+        if u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
+
+_LLM_ATS_SYSTEM = """You identify which Applicant Tracking System (ATS) a company uses for its public job board.
+
+Supported platforms and their URL shapes:
+- greenhouse        → boards.greenhouse.io/{slug} or job-boards.greenhouse.io/{slug}
+- lever             → jobs.lever.co/{slug}
+- workable          → apply.workable.com/{slug} or {slug}.workable.com
+- ashby             → jobs.ashbyhq.com/{slug}
+- smartrecruiters   → jobs.smartrecruiters.com/{slug}
+
+Two-step method:
+1. **Scan the HTML** for direct evidence (URLs containing greenhouse.io / lever.co / workable.com / ashbyhq.com / smartrecruiters.com). If found, return that platform + slug.
+2. **If no direct evidence**, use your training knowledge of where well-known companies host their careers. Many large tech companies use Greenhouse or Lever. The slug is usually a lowercase, dash-separated version of the company name (e.g. "stripe", "anthropic", "canva", "atlassian", "robinhood", "notion", "airbnb").
+
+Output schema (return one JSON object only, no prose, no code fences):
+{"platform": "greenhouse"|"lever"|"workable"|"ashby"|"smartrecruiters"|"unknown", "slug": "..."}
+
+Rules:
+- Only return platform != "unknown" if at least 60% confident the slug is correct.
+- If the company uses Workday, SAP, Taleo, or a fully custom system, return platform="unknown".
+- The slug must be lowercase and contain only letters, digits, and dashes.
+- Don't invent slugs you're unsure about — "unknown" is better than wrong.
+"""
+
+
+def _llm_detect_ats(html: str, url: str, api_key: str) -> tuple[str, str] | None:
+    try:
+        import anthropic  # lazy
+    except ImportError:
+        return None
+
+    # Strip noise from the HTML before sending
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["style", "noscript", "header", "footer"]):
+        tag.decompose()
+    # Keep <script src=> URLs but drop body text for scripts (lighter payload)
+    for tag in soup.find_all("script"):
+        if not tag.get("src"):
+            tag.decompose()
+    text_blob = str(soup)[:8000]
+
+    client = anthropic.Anthropic(api_key=api_key)
+    try:
+        msg = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=200,
+            system=_LLM_ATS_SYSTEM,
+            messages=[{"role": "user", "content": f"URL: {url}\n\nHTML:\n{text_blob}"}],
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+    raw = "".join(getattr(b, "text", "") for b in msg.content if getattr(b, "type", None) == "text").strip()
+    if raw.startswith("```"):
+        if "\n" in raw:
+            raw = raw.split("\n", 1)[1]
+        if raw.endswith("```"):
+            raw = raw.rsplit("```", 1)[0]
+        raw = raw.strip()
+
+    import json as _json
+    try:
+        data = _json.loads(raw)
+    except _json.JSONDecodeError:
+        s, e = raw.find("{"), raw.rfind("}")
+        if s == -1 or e <= s:
+            return None
+        try:
+            data = _json.loads(raw[s : e + 1])
+        except _json.JSONDecodeError:
+            return None
+
+    if not isinstance(data, dict):
+        return None
+    platform = str(data.get("platform", "")).lower().strip()
+    slug = str(data.get("slug", "")).strip()
+    if platform in {"greenhouse", "lever", "workable", "ashby", "smartrecruiters"} and slug:
+        return platform, slug
+    return None
+
+
 # --- Fetchers (one per platform) ----------------------------------------
 
 def fetch_jobs(platform: str, slug: str) -> tuple[str, list[CompanyJobResult]]:
