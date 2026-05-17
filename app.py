@@ -825,7 +825,10 @@ if ss["job"]:
                 st.markdown(f"- **{label}**: {value}")
             links = []
             if job.get("company_profile_url"):
-                links.append(f"[Company page on SEEK]({job['company_profile_url']})")
+                ref = job["company_profile_url"]
+                # SEEK redux fills these with seek.com.au URLs; LLM extraction returns the company's own site.
+                label = "Company page on SEEK" if "seek.com.au" in ref else "Company website"
+                links.append(f"[{label}]({ref})")
             if job.get("company_jobs_url"):
                 links.append(f"[All open roles on SEEK]({job['company_jobs_url']})")
             if links:

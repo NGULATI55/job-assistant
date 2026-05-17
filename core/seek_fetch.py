@@ -442,22 +442,27 @@ def _extract_from_seek_redux(html: str, source_url: str) -> Job | None:
     }
 
 
-_LLM_EXTRACT_SYSTEM = """You extract structured job posting data from raw web page text.
+_LLM_EXTRACT_SYSTEM = """You extract structured job + company data from raw web page text.
 
 Return ONE JSON object only. No prose, no code fences. Schema:
 {
-  "title": "Job title — what role is being advertised",
-  "company": "The hiring company name. NOT the job board name.",
+  "title": "Job title being advertised.",
+  "company": "The HIRING company. If a recruiter agency is posting on behalf of an undisclosed client, use the agency name. If the client is disclosed, prefer the client.",
   "location": "City/region (e.g. 'Melbourne VIC'). Empty string if not in text.",
   "description": "Full job description body. Include responsibilities AND requirements. Preserve list structure with - bullets where present. Don't truncate.",
   "salary": "Salary if mentioned, otherwise empty string.",
-  "employment_type": "Full-time / Part-time / Contract / Casual etc., or empty string."
+  "employment_type": "Full-time / Part-time / Contract / Casual etc., or empty string.",
+  "company_industry": "Industry sector of the hiring company if mentioned (e.g. 'Digital Marketing', 'Healthcare', 'Government', 'Finance'). Empty string if not in text.",
+  "company_size": "Company size if mentioned (e.g. '50-200 employees', '500+ staff', 'startup'). Empty string if not in text.",
+  "company_website": "Full URL of the hiring company's own website if mentioned (NOT the URL of the job posting). Empty string if not in text.",
+  "company_about": "1-3 sentence description of WHAT THE HIRING COMPANY DOES (their business), if explicitly described on the page. Empty string if not in text or if the page only describes the role."
 }
 
 Rules:
-- Use ONLY information present in the supplied text. Do not invent fields.
-- If the page is a 404 page, login screen, or doesn't contain a job posting at all, return an object where every value is empty: title='', company='', etc.
+- Use ONLY information present in the supplied text. Do not invent fields. Leave fields empty rather than guessing.
+- If the page is a 404 page, login screen, or doesn't contain a job posting at all, return an object where every value is empty.
 - 'description' should be substantive (multiple sentences). If the body text is missing or generic boilerplate, leave it empty.
+- 'company_about' is the company's own story (who they are, what they do), not the job description.
 - Australian English spelling and tone. Do not paraphrase the description; preserve the original wording.
 """
 
@@ -528,6 +533,12 @@ def _extract_via_llm(html: str, source_url: str, api_key: str) -> Job:
             "Use the manual paste fallback."
         )
 
+    # Fold company_about into the description (under a "About the company" heading)
+    # so it appears in the tailoring context for Claude AND in the job-description expander.
+    company_about = (data.get("company_about") or "").strip()
+    if company_about:
+        description = description.rstrip() + "\n\n---\n\nAbout the company:\n" + company_about
+
     return {
         "source": "url",
         "source_ref": source_url,
@@ -537,9 +548,9 @@ def _extract_via_llm(html: str, source_url: str, api_key: str) -> Job:
         "description": description,
         "salary": _clean_text(data.get("salary", "")),
         "employment_type": _clean_text(data.get("employment_type", "")),
-        "company_industry": "",
-        "company_size": "",
-        "company_profile_url": "",
+        "company_industry": _clean_text(data.get("company_industry", "")),
+        "company_size": _clean_text(data.get("company_size", "")),
+        "company_profile_url": _clean_text(data.get("company_website", "")),
         "company_jobs_url": "",
     }
 
