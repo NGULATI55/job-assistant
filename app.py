@@ -731,9 +731,11 @@ with st.container(border=True):
 
     elif mode == "Job URL":
         st.caption(
-            "Works for SEEK, Indeed, Glassdoor, and most company career pages that publish "
-            "structured job data. LinkedIn URLs typically fail (login required) — use the "
-            "Manual paste fallback that appears on failure."
+            "Paste any job URL — SEEK, Indeed, Glassdoor, a company's career page, an "
+            "agency posting, anything public. If structured data isn't on the page, "
+            "Claude reads the page and extracts the job details (uses ~$0.005 of your "
+            "Anthropic credit per fetch). LinkedIn job URLs still need a login so they "
+            "typically fail — use Manual paste for those."
         )
         url = st.text_input(
             "Job URL",
@@ -741,7 +743,8 @@ with st.container(border=True):
         )
         if st.button("Fetch job", disabled=not url.strip()):
             try:
-                fetched_job, missing = seek_fetch.fetch_from_url(url)
+                with st.spinner("Fetching job details..."):
+                    fetched_job, missing = seek_fetch.fetch_from_url(url, api_key=api_key or None)
                 kind = "ok" if not missing else "partial"
                 ss["fetch_status"] = (kind, missing, None, url)
                 job = fetched_job

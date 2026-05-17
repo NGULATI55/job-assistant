@@ -79,14 +79,24 @@ def load_mock() -> Job:
     return dict(_MOCK_JOB)  # type: ignore[return-value]
 
 
-def fetch_from_url(url: str, timeout: float = 15.0) -> tuple[Job, list[str]]:
-    """Fetch a SEEK job page and extract the JobPosting via JSON-LD.
+def fetch_from_url(
+    url: str,
+    timeout: float = 15.0,
+    api_key: str | None = None,
+) -> tuple[Job, list[str]]:
+    """Fetch a job posting page and extract structured fields.
 
-    Returns (job, missing_fields). `missing_fields` is empty when extraction
-    was clean, or lists which REQUIRED_FIELDS came back empty (partial extraction).
+    Tries three strategies in order:
+    1. JSON-LD JobPosting schema (works on SEEK, Indeed, Glassdoor, most ATS pages,
+       and any career page that publishes structured data).
+    2. SEEK's window.SEEK_REDUX_DATA blob (modern SEEK pages without JSON-LD).
+    3. Claude LLM extraction (requires `api_key`) — used as a last resort for
+       free-form company career pages that have no structured data.
 
-    Raises FetchError on network failure or when no JobPosting JSON-LD can be
-    located on the page. The UI catches this and offers the manual paste fallback.
+    Returns (job, missing_fields). `missing_fields` is empty when extraction was
+    clean, or lists which REQUIRED_FIELDS came back empty (partial extraction).
+
+    Raises FetchError on network failure or when no extractor succeeds.
     """
     url = url.strip()
     if not url:
@@ -110,14 +120,24 @@ def fetch_from_url(url: str, timeout: float = 15.0) -> tuple[Job, list[str]]:
     if posting is not None:
         job = _normalize_posting(posting, url)
     else:
-        # Fallback: SEEK now embeds the job in window.SEEK_REDUX_DATA instead of JSON-LD.
+        # Strategy 2 — SEEK's window.SEEK_REDUX_DATA blob.
         job = _extract_from_seek_redux(html, url)
         if job is None:
-            raise FetchError(
-                "Could not find a JobPosting on the page (neither JSON-LD nor "
-                "SEEK_REDUX_DATA). SEEK may have changed its layout, or the URL "
-                "may not be a job ad. Use the manual paste fallback."
-            )
+            # Strategy 3 — last-resort LLM extraction for free-form career pages.
+            if api_key and api_key.strip():
+                try:
+                    job = _extract_via_llm(html, url, api_key.strip())
+                except Exception as e:  # noqa: BLE001
+                    raise FetchError(
+                        "Couldn't extract structured job data from the page, and "
+                        f"the LLM fallback also failed: {e}"
+                    ) from e
+            else:
+                raise FetchError(
+                    "Couldn't find structured job data on this page (no JSON-LD, "
+                    "no SEEK Redux blob). Set an Anthropic API key in the sidebar "
+                    "to enable LLM-powered extraction, or use the manual paste fallback."
+                )
 
     missing = [f for f in REQUIRED_FIELDS if not job[f]]  # type: ignore[literal-required]
     return job, missing
@@ -419,6 +439,108 @@ def _extract_from_seek_redux(html: str, source_url: str) -> Job | None:
         "company_size": size,
         "company_profile_url": profile_url,
         "company_jobs_url": jobs_url,
+    }
+
+
+_LLM_EXTRACT_SYSTEM = """You extract structured job posting data from raw web page text.
+
+Return ONE JSON object only. No prose, no code fences. Schema:
+{
+  "title": "Job title — what role is being advertised",
+  "company": "The hiring company name. NOT the job board name.",
+  "location": "City/region (e.g. 'Melbourne VIC'). Empty string if not in text.",
+  "description": "Full job description body. Include responsibilities AND requirements. Preserve list structure with - bullets where present. Don't truncate.",
+  "salary": "Salary if mentioned, otherwise empty string.",
+  "employment_type": "Full-time / Part-time / Contract / Casual etc., or empty string."
+}
+
+Rules:
+- Use ONLY information present in the supplied text. Do not invent fields.
+- If the page is a 404 page, login screen, or doesn't contain a job posting at all, return an object where every value is empty: title='', company='', etc.
+- 'description' should be substantive (multiple sentences). If the body text is missing or generic boilerplate, leave it empty.
+- Australian English spelling and tone. Do not paraphrase the description; preserve the original wording.
+"""
+
+
+def _extract_via_llm(html: str, source_url: str, api_key: str) -> Job:
+    """Use Claude to parse a free-form career page into structured Job fields.
+
+    Strips navigation/scripts/styles, sends the visible text to Claude with a
+    strict JSON schema, and validates the result has at least a title.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    # Strip non-content elements before sending to the LLM.
+    for tag in soup(["script", "style", "noscript", "nav", "footer", "header", "form", "iframe"]):
+        tag.decompose()
+    text = soup.get_text(separator="\n")
+    lines = [ln.strip() for ln in text.splitlines()]
+    text = "\n".join(ln for ln in lines if ln)
+    # Hard cap to keep token cost predictable (~2-3k tokens).
+    text = text[:12000]
+
+    if not text.strip():
+        raise FetchError("Page returned no usable text content.")
+
+    try:
+        import anthropic  # noqa: PLC0415 — lazy
+    except ImportError as e:
+        raise FetchError("anthropic package not installed.") from e
+
+    client = anthropic.Anthropic(api_key=api_key)
+    try:
+        msg = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=2500,
+            system=_LLM_EXTRACT_SYSTEM,
+            messages=[{"role": "user", "content": f"URL: {source_url}\n\nPAGE TEXT:\n{text}"}],
+        )
+    except anthropic.APIError as e:
+        raise FetchError(f"Anthropic API error during URL extraction: {e}") from e
+
+    raw = "".join(getattr(b, "text", "") for b in msg.content if getattr(b, "type", None) == "text").strip()
+    if raw.startswith("```"):
+        if "\n" in raw:
+            raw = raw.split("\n", 1)[1]
+        if raw.endswith("```"):
+            raw = raw.rsplit("```", 1)[0]
+        raw = raw.strip()
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        start, end = raw.find("{"), raw.rfind("}")
+        if start == -1 or end <= start:
+            raise FetchError(f"LLM returned unparseable output: {raw[:120]!r}")
+        try:
+            data = json.loads(raw[start : end + 1])
+        except json.JSONDecodeError as e:
+            raise FetchError(f"LLM returned unparseable output: {e}") from e
+
+    if not isinstance(data, dict):
+        raise FetchError("LLM returned non-object output.")
+
+    title = _clean_text(data.get("title", ""))
+    description = (data.get("description") or "").strip()
+
+    if not title and not description:
+        raise FetchError(
+            "Page didn't contain a job posting (or it required login). "
+            "Use the manual paste fallback."
+        )
+
+    return {
+        "source": "url",
+        "source_ref": source_url,
+        "title": title,
+        "company": _clean_text(data.get("company", "")),
+        "location": _clean_text(data.get("location", "")),
+        "description": description,
+        "salary": _clean_text(data.get("salary", "")),
+        "employment_type": _clean_text(data.get("employment_type", "")),
+        "company_industry": "",
+        "company_size": "",
+        "company_profile_url": "",
+        "company_jobs_url": "",
     }
 
 
