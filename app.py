@@ -940,6 +940,8 @@ if job is not None:
     ss["saved"] = None
     ss["download_bundle"] = None
     ss["tailor_error"] = None
+    # Reset any previously typed-in evidence — it belongs to the old job.
+    ss["resume_additions"] = {}
     # Auto-scroll the WP page (or local viewport) to Step 2 on the next rerun,
     # so picking "Tailor this" / "Load sample" / "Use this job" doesn't leave
     # the user stranded near the top.
@@ -1032,16 +1034,112 @@ if ss["draft"]:
             "This is a draft. Nothing has been saved yet — click **Approve** below to keep the output."
         )
 
-        summary = draft.get("match_summary", "").strip()
-        missing = draft.get("missing_requirements") or []
+        # --- Match score panel ----------------------------------------
+        score = int(draft.get("match_score", 0))
+        suggestions = draft.get("improvement_suggestions") or []
+        if score or suggestions:
+            score_col, summary_col = st.columns([1, 2])
+            with score_col:
+                # Colour the score with a stoplight band.
+                if score >= 85:
+                    band = "Strong fit"
+                elif score >= 70:
+                    band = "Good fit"
+                elif score >= 50:
+                    band = "Partial fit"
+                else:
+                    band = "Weak fit"
+                st.metric(label="Match score", value=f"{score}%", delta=band, delta_color="off")
+                st.progress(score / 100)
+            with summary_col:
+                summary = draft.get("match_summary", "").strip()
+                if summary:
+                    st.markdown("##### How you stack up")
+                    st.write(summary)
 
-        if summary:
-            st.markdown("##### Match summary")
-            st.write(summary)
+        if suggestions:
+            with st.expander("Ways to lift your match score", expanded=score < 85):
+                st.caption("Quick wins — most are things you probably already do but haven't written down.")
+                for s in suggestions:
+                    st.markdown(f"- {s}")
+
+        # --- Missing requirements + add-back form ---------------------
+        missing = draft.get("missing_requirements") or []
         if missing:
-            st.markdown("##### Missing requirements (not evidenced in your resume)")
-            for item in missing:
-                st.markdown(f"- {item}")
+            with st.container(border=True):
+                st.markdown("##### Missing requirements")
+                st.caption(
+                    "These weren't evidenced in your resume. If you actually have any of them, "
+                    "add a sentence or two below and click **Refine resume with my additions** — "
+                    "I'll weave them into the draft and recalculate the score."
+                )
+                ss.setdefault("resume_additions", {})
+                for i, item in enumerate(missing):
+                    addition_key = f"addition_{i}_{hash(item) & 0xFFFF}"
+                    st.markdown(f"**{item}**")
+                    ss["resume_additions"][item] = st.text_area(
+                        f"Evidence for: {item}",
+                        value=ss["resume_additions"].get(item, ""),
+                        key=addition_key,
+                        placeholder="e.g. \"Used Screaming Frog weekly at Acme to audit 30k-URL sites — found 400+ broken links per crawl on average\"",
+                        height=80,
+                        label_visibility="collapsed",
+                    )
+
+                # Refine button — only enabled if there's at least one filled
+                # addition.
+                filled_additions = {
+                    k: v.strip()
+                    for k, v in ss["resume_additions"].items()
+                    if v.strip() and k in missing
+                }
+                refine_col_a, refine_col_b = st.columns([1, 3])
+                with refine_col_a:
+                    refine_clicked = st.button(
+                        "🔄 Refine resume with my additions",
+                        type="primary",
+                        disabled=not filled_additions,
+                        use_container_width=True,
+                    )
+                with refine_col_b:
+                    if filled_additions:
+                        st.caption(
+                            f"Ready to refine using {len(filled_additions)} addition(s). "
+                            "The draft will regenerate and the score should rise."
+                        )
+                    else:
+                        st.caption("Fill in evidence for any item above to enable refinement.")
+
+                if refine_clicked:
+                    # Build a clean, structured evidence block to send back to Claude.
+                    evidence_lines = [
+                        f"- {item}: {detail}"
+                        for item, detail in filled_additions.items()
+                    ]
+                    evidence_blob = "\n".join(evidence_lines)
+                    ss["tailor_error"] = None
+                    with st.spinner("Re-tailoring with your additions..."):
+                        try:
+                            ss["draft"] = tailor.tailor(
+                                ss["job"],
+                                master_md,
+                                use_mock=use_mock,
+                                api_key=api_key or None,
+                                additional_evidence=evidence_blob,
+                            )
+                            ss["saved"] = None
+                            ss["download_bundle"] = None
+                            # Clear out additions for items that should now be resolved.
+                            still_missing = set(ss["draft"].get("missing_requirements") or [])
+                            ss["resume_additions"] = {
+                                k: v for k, v in ss["resume_additions"].items() if k in still_missing
+                            }
+                            ss["pending_scroll_step"] = 4
+                            st.rerun()
+                        except tailor.TailorError as e:
+                            ss["tailor_error"] = str(e)
+                if ss.get("tailor_error"):
+                    st.error(ss["tailor_error"])
 
         left, right = st.columns(2)
         with left:

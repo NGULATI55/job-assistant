@@ -24,6 +24,8 @@ class TailoredResult(TypedDict):
     cover_note_md: str
     match_summary: str
     missing_requirements: list[str]
+    match_score: int                       # 0-100 fit percentage
+    improvement_suggestions: list[str]     # actionable additions to lift the score
     is_mock: bool
 
 
@@ -42,6 +44,8 @@ Required keys:
 - "cover_note_md": string (Markdown)
 - "match_summary": string (one paragraph)
 - "missing_requirements": array of short strings
+- "match_score": integer 0 to 100
+- "improvement_suggestions": array of short strings
 
 TRUTHFULNESS (mandatory)
 - Use ONLY facts present in the master resume. Never invent experience, tools, qualifications, dates, achievements, or metrics.
@@ -86,6 +90,25 @@ MATCH SUMMARY
 MISSING REQUIREMENTS
 - Short strings listing job requirements that the candidate's listed experience does not evidence. Empty array if there are none.
 - Write naturally: "Screaming Frog not listed in experience", not "Screaming Frog not in master resume".
+
+MATCH SCORE
+- "match_score": integer 0 to 100 representing how well the candidate's listed experience evidences the role's requirements.
+- Anchor points: 90+ = strong fit, hits almost every stated requirement; 70 to 89 = good fit with a few gaps; 50 to 69 = some fit, several gaps; below 50 = significant mismatch.
+- Be objective. Do not inflate to be kind. The score should match what an experienced recruiter would give on a first read.
+
+IMPROVEMENT SUGGESTIONS
+- "improvement_suggestions": array of 2 to 5 short, actionable strings explaining what the candidate could add to their resume to lift the score.
+- Each item should suggest a SKILL, TOOL, METRIC, or PROJECT DETAIL they could surface — not advice that requires acquiring new experience.
+- Examples: "Add specific Python frameworks you've used (Django? Flask?)", "Quantify the SEO traffic uplift with a percentage", "Mention the team size you've managed".
+- The point is to help the candidate write down things they likely already know but haven't documented.
+- Return [] only if the resume is already a strong match.
+
+ADDITIONAL EVIDENCE (when supplied by the user)
+- If the user prompt contains an "ADDITIONAL EVIDENCE" block, treat each line as a truthful claim the candidate vouches for.
+- Incorporate the evidence naturally into the most appropriate section of the resume (skills list, a specific role's bullets, summary). Rewrite to match the voice of the rest of the resume — never paste it verbatim.
+- After incorporation, the corresponding item should disappear from missing_requirements.
+- Recalculate match_score to reflect the post-incorporation reality (it should typically rise).
+- If a claim is too vague to back up convincingly, add it as a brief skill mention only; do NOT invent a quantified achievement around it.
 """
 
 
@@ -98,16 +121,27 @@ def tailor(
     use_mock: bool = False,
     api_key: str | None = None,
     model: str = DEFAULT_MODEL,
+    additional_evidence: str | None = None,
 ) -> TailoredResult:
     """Generate a tailored resume + cover note + match summary + missing requirements.
+
+    Pass `additional_evidence` (free-form text) on a refinement pass to feed
+    Claude extra details the candidate has supplied for missing requirements.
+    Claude will weave them into the resume and recompute the match score.
 
     Raises TailorError on any failure (missing API key, empty master resume, API
     error, unparseable output). The UI catches this and shows a banner without
     crashing the app.
     """
     if use_mock:
-        return _tailor_mock(job, master_resume_md)
-    return _tailor_with_claude(job, master_resume_md, api_key=api_key, model=model)
+        return _tailor_mock(job, master_resume_md, additional_evidence=additional_evidence)
+    return _tailor_with_claude(
+        job,
+        master_resume_md,
+        api_key=api_key,
+        model=model,
+        additional_evidence=additional_evidence,
+    )
 
 
 # --- Real Claude call ---------------------------------------------------
@@ -118,6 +152,7 @@ def _tailor_with_claude(
     *,
     api_key: str | None,
     model: str,
+    additional_evidence: str | None = None,
 ) -> TailoredResult:
     resolved_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
     if not resolved_key.strip():
@@ -137,7 +172,7 @@ def _tailor_with_claude(
         ) from e
 
     client = anthropic.Anthropic(api_key=resolved_key)
-    user_prompt = _build_user_prompt(job, master_resume_md)
+    user_prompt = _build_user_prompt(job, master_resume_md, additional_evidence)
 
     try:
         msg = client.messages.create(
@@ -163,20 +198,36 @@ def _tailor_with_claude(
     return _parse_json_response(raw, is_mock=False)
 
 
-def _build_user_prompt(job: Job, master_resume_md: str) -> str:
-    return (
-        "JOB\n"
-        f"Title: {job.get('title', '')}\n"
-        f"Company: {job.get('company', '')}\n"
-        f"Location: {job.get('location', '')}\n"
-        f"Salary: {job.get('salary') or '(not specified)'}\n"
-        f"Employment type: {job.get('employment_type') or '(not specified)'}\n\n"
-        "Description:\n"
-        f"{job.get('description', '')}\n\n"
-        "---\n\n"
-        "MASTER RESUME (source of truth — do not invent beyond this):\n"
-        f"{master_resume_md}\n"
-    )
+def _build_user_prompt(
+    job: Job,
+    master_resume_md: str,
+    additional_evidence: str | None = None,
+) -> str:
+    parts = [
+        "JOB",
+        f"Title: {job.get('title', '')}",
+        f"Company: {job.get('company', '')}",
+        f"Location: {job.get('location', '')}",
+        f"Salary: {job.get('salary') or '(not specified)'}",
+        f"Employment type: {job.get('employment_type') or '(not specified)'}",
+        "",
+        "Description:",
+        job.get("description", ""),
+        "",
+        "---",
+        "",
+        "MASTER RESUME (source of truth — do not invent beyond this):",
+        master_resume_md,
+    ]
+    if additional_evidence and additional_evidence.strip():
+        parts.extend([
+            "",
+            "---",
+            "",
+            "ADDITIONAL EVIDENCE (the candidate has confirmed these are true and asked you to incorporate them):",
+            additional_evidence.strip(),
+        ])
+    return "\n".join(parts) + "\n"
 
 
 # --- Parsing + validation -----------------------------------------------
@@ -232,24 +283,46 @@ def _validate_result(data: object, *, is_mock: bool) -> TailoredResult:
     if not isinstance(missing, list) or not all(isinstance(x, str) for x in missing):
         raise TailorError("The draft came back in an unexpected format. Try again in a moment.")
 
+    # Optional new fields — accept missing/bad shapes gracefully so older
+    # responses or mid-stream changes don't break the parse.
+    raw_score = data.get("match_score", 0)
+    try:
+        match_score = int(raw_score)
+    except (TypeError, ValueError):
+        match_score = 0
+    match_score = max(0, min(100, match_score))
+
+    raw_suggestions = data.get("improvement_suggestions", [])
+    if isinstance(raw_suggestions, list):
+        suggestions = [str(s).strip() for s in raw_suggestions if str(s).strip()]
+    else:
+        suggestions = []
+
     return {
         "tailored_resume_md": resume.strip(),
         "cover_note_md": cover.strip(),
         "match_summary": summary.strip(),
         "missing_requirements": [m.strip() for m in missing if m.strip()],
+        "match_score": match_score,
+        "improvement_suggestions": suggestions,
         "is_mock": is_mock,
     }
 
 
 # --- Mock fallback (debug only) -----------------------------------------
 
-def _tailor_mock(job: Job, master_resume_md: str) -> TailoredResult:
+def _tailor_mock(
+    job: Job,
+    master_resume_md: str,
+    additional_evidence: str | None = None,
+) -> TailoredResult:
     """Return a recognisable hardcoded draft. Used by the sidebar debug toggle."""
     title = job["title"]
     company = job["company"]
     location = job.get("location", "")
 
     resume_preview = (master_resume_md.strip().splitlines() or ["(master_resume.md is empty)"])[0]
+    refined = bool(additional_evidence and additional_evidence.strip())
 
     return {
         "tailored_resume_md": (
@@ -261,8 +334,9 @@ def _tailor_mock(job: Job, master_resume_md: str) -> TailoredResult:
             f"## Highlights\n"
             f"- Led paid social + Google Ads campaigns end-to-end\n"
             f"- Built and maintained the content calendar across blog, email and social\n"
-            f"- Lifted organic traffic via on-page SEO\n\n"
-            f"## Source line from master resume\n> {resume_preview}\n"
+            f"- Lifted organic traffic via on-page SEO\n"
+            + ("- (Mock) Incorporated your additional evidence into a relevant bullet\n" if refined else "")
+            + f"\n## Source line from master resume\n> {resume_preview}\n"
         ),
         "cover_note_md": (
             f"Hi {company} team,\n\n"
@@ -276,6 +350,17 @@ def _tailor_mock(job: Job, master_resume_md: str) -> TailoredResult:
         "match_summary": (
             "MOCK match summary. Real summaries come from Claude based on the master resume."
         ),
-        "missing_requirements": ["(mock) any requirement Claude would normally flag goes here"],
+        "missing_requirements": (
+            [] if refined else ["(mock) any requirement Claude would normally flag goes here"]
+        ),
+        "match_score": 82 if refined else 68,
+        "improvement_suggestions": (
+            [
+                "(mock) Quantify the SEO bullet with a traffic percentage",
+                "(mock) Name the specific paid-social platforms (Meta, TikTok, LinkedIn)",
+            ]
+            if not refined
+            else ["(mock) Resume now aligns more closely with the role's must-haves"]
+        ),
         "is_mock": True,
     }
