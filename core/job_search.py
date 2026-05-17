@@ -244,3 +244,97 @@ def suggest_location_from_resume(resume_text: str, default: str = "Australia") -
         if city in head:
             return city.title()
     return default
+
+
+# --- Claude-powered resume analysis -------------------------------------
+
+_SUGGEST_SYSTEM_PROMPT = """You analyse resumes to pick the best job search query for the candidate.
+
+Return ONE JSON object only. No prose, no code fences. Schema:
+{
+  "keywords": "Job-title-style search query, 2 to 6 words. Use the candidate's most recent role title and primary skill. Max 60 chars.",
+  "location": "Australian city (Sydney / Melbourne / Brisbane / Perth / Adelaide / Canberra / Hobart / Darwin) or 'Australia' if unclear.",
+  "reasoning": "ONE short sentence (max 25 words) explaining why these terms match."
+}
+
+Rules:
+- Use the candidate's actual recent role title where possible. Don't invent more senior or junior versions.
+- Use AU spelling and AU job market vocabulary.
+- Keywords should be a phrase a recruiter would search for (e.g. "Senior SEO Specialist", "Marketing Manager", "Data Analyst"), NOT a list of skills.
+- If the resume mixes roles, pick the most prominent / most recent one.
+"""
+
+
+class SearchSuggestion(TypedDict):
+    keywords: str
+    location: str
+    reasoning: str
+
+
+def suggest_search_terms_from_resume(
+    resume_text: str,
+    api_key: str,
+    model: str = "claude-sonnet-4-6",
+) -> SearchSuggestion:
+    """Ask Claude to suggest the best Adzuna search terms for a given resume.
+
+    Raises JobSearchError on missing input / API error / unparseable output.
+    """
+    if not resume_text or not resume_text.strip():
+        raise JobSearchError("Resume is empty. Upload a resume before asking for suggestions.")
+    if not api_key or not api_key.strip():
+        raise JobSearchError("Anthropic API key is required for the resume-based suggestion.")
+
+    try:
+        import anthropic  # lazy import
+    except ImportError as e:
+        raise JobSearchError(
+            "The 'anthropic' package is not installed. Run: pip install -r requirements.txt"
+        ) from e
+
+    client = anthropic.Anthropic(api_key=api_key.strip())
+    try:
+        msg = client.messages.create(
+            model=model,
+            max_tokens=300,
+            system=_SUGGEST_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": f"RESUME:\n{resume_text}"}],
+        )
+    except anthropic.APIError as e:
+        raise JobSearchError(f"Anthropic API error: {e}") from e
+    except Exception as e:  # noqa: BLE001
+        raise JobSearchError(f"Unexpected error calling Anthropic: {e}") from e
+
+    raw = "".join(
+        getattr(b, "text", "") for b in msg.content
+        if getattr(b, "type", None) == "text"
+    ).strip()
+
+    # Defensive JSON parse: strip code fences if present, then locate {...} body.
+    if raw.startswith("```"):
+        if "\n" in raw:
+            raw = raw.split("\n", 1)[1]
+        if raw.endswith("```"):
+            raw = raw.rsplit("```", 1)[0]
+        raw = raw.strip()
+
+    import json
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        start, end = raw.find("{"), raw.rfind("}")
+        if start == -1 or end <= start:
+            raise JobSearchError(f"Could not parse Claude's suggestion: {raw[:120]!r}")
+        try:
+            data = json.loads(raw[start : end + 1])
+        except json.JSONDecodeError as e:
+            raise JobSearchError(f"Could not parse Claude's suggestion: {e}") from e
+
+    if not isinstance(data, dict):
+        raise JobSearchError("Claude returned non-object output for the search suggestion.")
+
+    return {
+        "keywords": str(data.get("keywords", "")).strip()[:60],
+        "location": str(data.get("location", "Australia")).strip() or "Australia",
+        "reasoning": str(data.get("reasoning", "")).strip(),
+    }

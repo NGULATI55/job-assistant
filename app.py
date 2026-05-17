@@ -621,22 +621,55 @@ with st.container(border=True):
                 "`ADZUNA_APP_ID` and `ADZUNA_APP_KEY` to your Streamlit Cloud Secrets."
             )
         else:
-            # Pre-fill suggestions from the loaded resume
-            suggested_q = job_search.suggest_keywords_from_resume(master_md) if master_md else ""
-            suggested_loc = job_search.suggest_location_from_resume(master_md) if master_md else "Australia"
+            # Seed defaults using the heuristic extractor (regex). The smart button below
+            # uses Claude for a much better suggestion.
+            heur_q = job_search.suggest_keywords_from_resume(master_md) if master_md else ""
+            heur_loc = job_search.suggest_location_from_resume(master_md) if master_md else "Australia"
+            ss.setdefault("search_q_input", heur_q)
+            ss.setdefault("search_loc_input", heur_loc)
+
+            def _on_resume_suggest():
+                """Callback: ask Claude for the best search terms for this resume."""
+                if not master_md.strip():
+                    ss["suggest_error"] = "Upload a resume first."
+                    return
+                if not api_key:
+                    ss["suggest_error"] = "Anthropic API key required (paste it in the sidebar)."
+                    return
+                try:
+                    out = job_search.suggest_search_terms_from_resume(master_md, api_key)
+                    # Setting these BEFORE the widgets render this turn (via callback) works.
+                    ss["search_q_input"] = out["keywords"]
+                    ss["search_loc_input"] = out["location"]
+                    ss["suggest_reasoning"] = out["reasoning"]
+                    ss["suggest_error"] = ""
+                except job_search.JobSearchError as e:
+                    ss["suggest_error"] = str(e)
+
+            sb_col, _ = st.columns([1, 2])
+            with sb_col:
+                st.button(
+                    "🪄 Suggest from my resume",
+                    on_click=_on_resume_suggest,
+                    disabled=not master_md.strip(),
+                    help="Claude reads your resume and picks the best search query.",
+                    use_container_width=True,
+                )
+            if ss.get("suggest_error"):
+                st.error(ss["suggest_error"])
+            if ss.get("suggest_reasoning"):
+                st.caption(f"💡 {ss['suggest_reasoning']}")
 
             col_a, col_b = st.columns([2, 1])
             with col_a:
                 q = st.text_input(
                     "Keywords",
-                    value=ss.get("search_query") or suggested_q,
                     placeholder="e.g. SEO specialist, marketing manager",
                     key="search_q_input",
                 )
             with col_b:
                 loc = st.text_input(
                     "Location",
-                    value=suggested_loc,
                     placeholder="Sydney, Melbourne, Australia",
                     key="search_loc_input",
                 )
