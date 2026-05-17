@@ -1,0 +1,253 @@
+"""ATS (Applicant Tracking System) public job-feed clients.
+
+Many companies host their careers pages on third-party ATS platforms that expose
+public JSON endpoints listing every open role at that company. No auth, no rate
+limits, no scraping — just public APIs designed for aggregators.
+
+Supported platforms (paste a careers URL from any of these and the app auto-detects):
+- Greenhouse        e.g. https://boards.greenhouse.io/stripe
+- Lever             e.g. https://jobs.lever.co/notion
+- Workable          e.g. https://apply.workable.com/glasses-com
+- Ashby             e.g. https://jobs.ashbyhq.com/cocoonweaver
+- SmartRecruiters   e.g. https://jobs.smartrecruiters.com/Coca-Cola
+"""
+
+from __future__ import annotations
+
+import re
+from typing import TypedDict
+
+import requests
+from bs4 import BeautifulSoup
+
+from .seek_fetch import Job
+
+
+class CompanyJobResult(TypedDict):
+    title: str
+    company: str
+    location: str
+    department: str
+    posted: str           # YYYY-MM-DD or ""
+    url: str
+    source: str           # platform name e.g. "Greenhouse"
+    description: str      # plain text (HTML stripped); may be empty for some platforms
+
+
+class ATSError(Exception):
+    """Detection / fetch failure for an ATS source."""
+
+
+# --- Detection ----------------------------------------------------------
+
+_PATTERNS: list[tuple[str, str]] = [
+    # Greenhouse — multiple URL forms over the years
+    (r"(?:job-)?boards(?:-api)?\.greenhouse\.io/(?:embed/job_board/?\?for=)?([\w.-]+)", "greenhouse"),
+    # Lever
+    (r"jobs\.lever\.co/([\w.-]+)", "lever"),
+    # Workable (two URL shapes — apply.workable.com/{slug} OR {slug}.workable.com)
+    (r"apply\.workable\.com/([\w.-]+)", "workable"),
+    (r"https?://([\w.-]+)\.workable\.com", "workable"),
+    # Ashby
+    (r"jobs\.ashbyhq\.com/([\w.-]+)", "ashby"),
+    # SmartRecruiters
+    (r"(?:jobs|careers)\.smartrecruiters\.com/([\w.-]+)", "smartrecruiters"),
+]
+
+
+def detect_ats(url: str) -> tuple[str, str] | None:
+    """Return (platform, slug) if `url` matches a supported ATS pattern, else None."""
+    if not url:
+        return None
+    u = url.strip()
+    for pattern, platform in _PATTERNS:
+        m = re.search(pattern, u, re.IGNORECASE)
+        if m:
+            slug = m.group(1).strip("/").strip()
+            if slug:
+                return platform, slug
+    return None
+
+
+# --- Fetchers (one per platform) ----------------------------------------
+
+def fetch_jobs(platform: str, slug: str) -> tuple[str, list[CompanyJobResult]]:
+    """Fetch all current open roles for `slug` on `platform`.
+
+    Returns (display_company_name, list_of_results). Raises ATSError on failure.
+    """
+    handlers = {
+        "greenhouse": _fetch_greenhouse,
+        "lever": _fetch_lever,
+        "workable": _fetch_workable,
+        "ashby": _fetch_ashby,
+        "smartrecruiters": _fetch_smartrecruiters,
+    }
+    fn = handlers.get(platform)
+    if not fn:
+        raise ATSError(f"Unsupported platform: {platform}")
+    return fn(slug)
+
+
+def _strip_html_text(html: str) -> str:
+    if not html:
+        return ""
+    soup = BeautifulSoup(html, "html.parser")
+    text = soup.get_text("\n")
+    return "\n".join(ln.strip() for ln in text.splitlines() if ln.strip()).strip()
+
+
+def _safe_get_json(url: str, *, post_body: dict | None = None, timeout: float = 15.0) -> dict | list:
+    try:
+        if post_body is not None:
+            resp = requests.post(url, json=post_body, timeout=timeout)
+        else:
+            resp = requests.get(url, timeout=timeout)
+        resp.raise_for_status()
+        return resp.json()
+    except requests.RequestException as e:
+        raise ATSError(f"Network error: {e}") from e
+    except ValueError as e:  # JSON decode
+        raise ATSError(f"Response wasn't valid JSON: {e}") from e
+
+
+def _fetch_greenhouse(slug: str) -> tuple[str, list[CompanyJobResult]]:
+    """Greenhouse: GET /v1/boards/{slug}/jobs?content=true returns all open roles."""
+    data = _safe_get_json(f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true")
+    if not isinstance(data, dict):
+        raise ATSError("Greenhouse returned unexpected shape")
+    company_name = (data.get("meta") or {}).get("title") or slug.replace("-", " ").title()
+    results: list[CompanyJobResult] = []
+    for j in data.get("jobs", []):
+        loc = j.get("location") or {}
+        results.append({
+            "title": str(j.get("title", "")).strip(),
+            "company": str(company_name),
+            "location": str(loc.get("name", "")).strip() if isinstance(loc, dict) else "",
+            "department": "",
+            "posted": str(j.get("updated_at", ""))[:10],
+            "url": str(j.get("absolute_url", "")).strip(),
+            "source": "Greenhouse",
+            "description": _strip_html_text(j.get("content", "")),
+        })
+    return company_name, results
+
+
+def _fetch_lever(slug: str) -> tuple[str, list[CompanyJobResult]]:
+    """Lever: GET /v0/postings/{slug}?mode=json returns array."""
+    data = _safe_get_json(f"https://api.lever.co/v0/postings/{slug}?mode=json")
+    if not isinstance(data, list):
+        raise ATSError("Lever returned unexpected shape")
+    company_name = slug.replace("-", " ").title()
+    results: list[CompanyJobResult] = []
+    for j in data:
+        cats = j.get("categories") or {}
+        results.append({
+            "title": str(j.get("text", "")).strip(),
+            "company": str(company_name),
+            "location": str(cats.get("location", "")).strip(),
+            "department": str(cats.get("department", "") or cats.get("team", "")).strip(),
+            "posted": "",
+            "url": str(j.get("hostedUrl") or j.get("applyUrl") or "").strip(),
+            "source": "Lever",
+            "description": _strip_html_text(j.get("description", "")),
+        })
+    return company_name, results
+
+
+def _fetch_workable(slug: str) -> tuple[str, list[CompanyJobResult]]:
+    """Workable v3: POST /api/v3/accounts/{slug}/jobs with empty body returns paginated list."""
+    data = _safe_get_json(
+        f"https://apply.workable.com/api/v3/accounts/{slug}/jobs",
+        post_body={"query": "", "limit": 100},
+    )
+    if not isinstance(data, dict):
+        raise ATSError("Workable returned unexpected shape")
+    results: list[CompanyJobResult] = []
+    company_name = slug.replace("-", " ").title()
+    for j in data.get("results", []):
+        loc_obj = j.get("location") or {}
+        if isinstance(loc_obj, dict):
+            loc = ", ".join(p for p in [
+                loc_obj.get("city"), loc_obj.get("region"), loc_obj.get("country")
+            ] if p)
+        else:
+            loc = str(loc_obj or "")
+        results.append({
+            "title": str(j.get("title", "")).strip(),
+            "company": str(j.get("company", company_name)).strip(),
+            "location": loc.strip(),
+            "department": str(j.get("department", "")).strip(),
+            "posted": str(j.get("published_on", ""))[:10],
+            "url": str(j.get("url") or f"https://apply.workable.com/{slug}/j/{j.get('shortcode', '')}").strip(),
+            "source": "Workable",
+            "description": _strip_html_text(j.get("description", "")),
+        })
+    if results:
+        company_name = results[0]["company"]
+    return company_name, results
+
+
+def _fetch_ashby(slug: str) -> tuple[str, list[CompanyJobResult]]:
+    """Ashby: GET /posting-api/job-board/{slug}?includeCompensation=true"""
+    data = _safe_get_json(f"https://api.ashbyhq.com/posting-api/job-board/{slug}?includeCompensation=true")
+    if not isinstance(data, dict):
+        raise ATSError("Ashby returned unexpected shape")
+    company_name = slug.replace("-", " ").title()
+    results: list[CompanyJobResult] = []
+    for j in data.get("jobs", []):
+        results.append({
+            "title": str(j.get("title", "")).strip(),
+            "company": str(company_name),
+            "location": str(j.get("locationName", "")).strip(),
+            "department": str(j.get("departmentName", "")).strip(),
+            "posted": str(j.get("publishedAt", ""))[:10],
+            "url": str(j.get("jobUrl", "")).strip(),
+            "source": "Ashby",
+            "description": _strip_html_text(j.get("descriptionHtml", "") or ""),
+        })
+    return company_name, results
+
+
+def _fetch_smartrecruiters(slug: str) -> tuple[str, list[CompanyJobResult]]:
+    """SmartRecruiters: GET /v1/companies/{slug}/postings"""
+    data = _safe_get_json(f"https://api.smartrecruiters.com/v1/companies/{slug}/postings?limit=100")
+    if not isinstance(data, dict):
+        raise ATSError("SmartRecruiters returned unexpected shape")
+    company_name = slug.replace("-", " ").title()
+    results: list[CompanyJobResult] = []
+    for j in data.get("content", []):
+        loc = j.get("location") or {}
+        loc_str = ", ".join(p for p in [
+            loc.get("city"), loc.get("region"), loc.get("country")
+        ] if p) if isinstance(loc, dict) else ""
+        results.append({
+            "title": str(j.get("name", "")).strip(),
+            "company": str(company_name),
+            "location": loc_str.strip(),
+            "department": "",
+            "posted": str(j.get("releasedDate", ""))[:10],
+            "url": str(j.get("ref", "")).strip(),
+            "source": "SmartRecruiters",
+            "description": "",  # full description requires per-posting fetch
+        })
+    return company_name, results
+
+
+# --- Conversion to standard Job dict for the tailor pipeline ------------
+
+def result_to_job(r: CompanyJobResult) -> Job:
+    return {
+        "source": "ats",
+        "source_ref": r.get("url", ""),
+        "title": r.get("title", "") or "Untitled role",
+        "company": r.get("company", "") or "Unknown company",
+        "location": r.get("location", ""),
+        "description": r.get("description", "") or r.get("title", ""),
+        "salary": "",
+        "employment_type": "",
+        "company_industry": r.get("department", ""),
+        "company_size": "",
+        "company_profile_url": "",
+        "company_jobs_url": "",
+    }

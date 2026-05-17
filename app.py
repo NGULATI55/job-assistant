@@ -21,7 +21,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from core import seek_fetch, resume_loader, tailor, saver, exporter, job_search
+from core import seek_fetch, resume_loader, tailor, saver, exporter, job_search, ats_feeds
 
 
 # --- Playwright bootstrap (for hosted deployments like Streamlit Cloud) ---
@@ -371,6 +371,7 @@ if not _check_access_gate():
 ss.setdefault("job", None)
 ss.setdefault("search_results", None)  # list of JobSearchResult dicts
 ss.setdefault("search_query", "")
+ss.setdefault("watched_companies", {})  # slug -> {platform, company_name, jobs[]}
 ss.setdefault("draft", None)
 ss.setdefault("saved", None)            # local mode: SavedApplication dict
 ss.setdefault("download_bundle", None)  # multi-user mode: (filename, bytes, warning)
@@ -704,7 +705,93 @@ with st.container(border=True):
                     st.error(f"Search failed: {e}")
                     ss["search_results"] = None
 
-            # Render results
+            # --- Watched companies (ATS feeds) ---
+            st.divider()
+            st.markdown("##### Watch specific companies")
+            st.caption(
+                "Paste a company's careers URL to fetch their current openings directly from their "
+                "ATS feed. Supports Greenhouse, Lever, Workable, Ashby, SmartRecruiters. "
+                "Examples: `https://jobs.lever.co/anthropic`, `https://boards.greenhouse.io/stripe`."
+            )
+            wc_col_a, wc_col_b = st.columns([4, 1])
+            with wc_col_a:
+                new_company_url = st.text_input(
+                    "Careers page URL",
+                    placeholder="https://jobs.lever.co/... or https://boards.greenhouse.io/...",
+                    key="watch_company_url",
+                    label_visibility="collapsed",
+                )
+            with wc_col_b:
+                add_clicked = st.button(
+                    "Add to watchlist",
+                    disabled=not new_company_url.strip(),
+                    use_container_width=True,
+                )
+
+            if add_clicked:
+                detection = ats_feeds.detect_ats(new_company_url)
+                if not detection:
+                    st.error(
+                        "Couldn't detect a supported ATS in that URL. Supported platforms: "
+                        "Greenhouse, Lever, Workable, Ashby, SmartRecruiters."
+                    )
+                else:
+                    platform, slug = detection
+                    try:
+                        with st.spinner(f"Fetching jobs from {platform.title()}..."):
+                            company_name, ats_results = ats_feeds.fetch_jobs(platform, slug)
+                        ss["watched_companies"][slug] = {
+                            "platform": platform,
+                            "company_name": company_name,
+                            "jobs": ats_results,
+                        }
+                        if ats_results:
+                            st.success(f"Added **{company_name}** — {len(ats_results)} open role(s).")
+                        else:
+                            st.info(f"Added **{company_name}** but they have no open roles right now.")
+                    except ats_feeds.ATSError as e:
+                        st.error(f"Couldn't fetch from {platform.title()}: {e}")
+
+            # Render watched companies
+            if ss.get("watched_companies"):
+                for slug, entry in list(ss["watched_companies"].items()):
+                    label = f"{entry['company_name']} — {len(entry['jobs'])} role(s) · via {entry['platform'].title()}"
+                    with st.expander(label, expanded=True):
+                        rem_col, _ = st.columns([1, 5])
+                        with rem_col:
+                            if st.button("Remove", key=f"wc_remove_{slug}"):
+                                del ss["watched_companies"][slug]
+                                st.rerun()
+                        if not entry["jobs"]:
+                            st.caption("No open roles right now.")
+                            continue
+                        for jx, j in enumerate(entry["jobs"]):
+                            with st.container(border=True):
+                                st.markdown(f"**{j['title']}**")
+                                sub_bits = [b for b in (j.get("location"), j.get("department"),
+                                                         j.get("posted"), j.get("source")) if b]
+                                if sub_bits:
+                                    st.caption(" · ".join(sub_bits))
+                                snip = (j.get("description") or "")[:250]
+                                if snip:
+                                    st.markdown(
+                                        f"<small>{snip}{'...' if len(j.get('description', '')) > 250 else ''}</small>",
+                                        unsafe_allow_html=True,
+                                    )
+                                c1, c2 = st.columns([1, 4])
+                                with c1:
+                                    if st.button("Tailor this", key=f"ats_pick_{slug}_{jx}",
+                                                 type="primary"):
+                                        job = ats_feeds.result_to_job(j)
+                                        ss["fetch_status"] = None
+                                with c2:
+                                    if j.get("url"):
+                                        st.markdown(
+                                            f"<small>[Open original posting]({j['url']})</small>",
+                                            unsafe_allow_html=True,
+                                        )
+
+            # --- Adzuna keyword search results ---
             if ss.get("search_results"):
                 results = ss["search_results"]
                 st.caption(f"Found {len(results)} job(s). Click 'Tailor for this job' to load one.")
