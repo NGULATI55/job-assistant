@@ -24,6 +24,59 @@ import streamlit as st
 from core import seek_fetch, resume_loader, tailor, saver, exporter, job_search, ats_feeds
 
 
+# --- Top Australian job-market locations -------------------------------
+# Ordered by how often Australians search them. The first option ("Australia")
+# matches anywhere in the country, which is what we use as the default fallback.
+AU_LOCATIONS: list[str] = [
+    "Australia",                    # anywhere
+    "Remote",
+    "Sydney",
+    "Melbourne",
+    "Brisbane",
+    "Perth",
+    "Adelaide",
+    "Canberra",
+    "Gold Coast",
+    "Newcastle",
+    "Wollongong",
+    "Sunshine Coast",
+    "Geelong",
+    "Hobart",
+    "Darwin",
+    "Cairns",
+    "Townsville",
+    "New South Wales",
+    "Victoria",
+    "Queensland",
+    "Western Australia",
+    "South Australia",
+    "Tasmania",
+    "Australian Capital Territory",
+    "Northern Territory",
+]
+
+
+def _clamp_au_location(text: str) -> str:
+    """Snap any free-form location string to the nearest item in AU_LOCATIONS.
+
+    Used when seeding the location selectbox from the resume parser or from
+    Claude's suggestion — both can return things like "Sydney NSW" or "Melbourne, VIC".
+    Falls back to "Australia" if no match found.
+    """
+    if not text:
+        return "Australia"
+    needle = text.strip().lower()
+    # Exact (case-insensitive) match wins
+    for loc in AU_LOCATIONS:
+        if loc.lower() == needle:
+            return loc
+    # Substring match — let "Sydney NSW 2000" -> "Sydney"
+    for loc in AU_LOCATIONS:
+        if loc.lower() in needle or needle in loc.lower():
+            return loc
+    return "Australia"
+
+
 # --- Playwright bootstrap (for hosted deployments like Streamlit Cloud) ---
 # On a fresh container the Chromium binary isn't installed yet. Run the install
 # once per session and cache the result. Local dev where chromium is already
@@ -628,7 +681,7 @@ with st.container(border=True):
             heur_q = job_search.suggest_keywords_from_resume(master_md) if master_md else ""
             heur_loc = job_search.suggest_location_from_resume(master_md) if master_md else "Australia"
             ss.setdefault("search_q_input", heur_q)
-            ss.setdefault("search_loc_input", heur_loc)
+            ss.setdefault("search_loc_input", _clamp_au_location(heur_loc))
 
             def _on_resume_suggest():
                 """Callback: ask Claude for the best search terms for this resume."""
@@ -642,7 +695,7 @@ with st.container(border=True):
                     out = job_search.suggest_search_terms_from_resume(master_md, api_key)
                     # Setting these BEFORE the widgets render this turn (via callback) works.
                     ss["search_q_input"] = out["keywords"]
-                    ss["search_loc_input"] = out["location"]
+                    ss["search_loc_input"] = _clamp_au_location(out["location"])
                     ss["suggest_reasoning"] = out["reasoning"]
                     ss["suggest_error"] = ""
                 except job_search.JobSearchError as e:
@@ -670,10 +723,15 @@ with st.container(border=True):
                     key="search_q_input",
                 )
             with col_b:
-                loc = st.text_input(
+                # Defensive: if session_state already has a stale value not in
+                # AU_LOCATIONS (older sessions), clamp it before the widget renders.
+                if ss.get("search_loc_input") not in AU_LOCATIONS:
+                    ss["search_loc_input"] = _clamp_au_location(ss.get("search_loc_input", ""))
+                loc = st.selectbox(
                     "Location",
-                    placeholder="Sydney, Melbourne, Australia",
+                    options=AU_LOCATIONS,
                     key="search_loc_input",
+                    help="Pick a city, state, or 'Australia' to search anywhere.",
                 )
 
             public_only = st.checkbox(
